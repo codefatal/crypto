@@ -26,13 +26,9 @@ from structlog.dev import ConsoleRenderer
 
 from config import get_settings
 from src.ai.analyzer import AIAnalyzer
-from src.data.binance_scanner import BinanceScanner
 from src.data.news_fetcher import NewsContext, NewsFetcher
-from src.data.upbit_scanner import UpbitScanner
-from src.execution.binance_trader import BinanceTrader
 from src.execution.logger import ReasoningLogger
 from src.execution.notifier import Notifier
-from src.execution.trader import OrderResult, UpbitTrader
 from src.indicator.bakkta import BakktaIndicator
 
 # ── 로깅 설정 ─────────────────────────────────────────────────────────
@@ -71,16 +67,18 @@ class Scanner(Protocol):
 class Trader(Protocol):
     async def init(self) -> None: ...
     async def close(self) -> None: ...
-    async def execute(self, decision) -> OrderResult | None: ...
+    async def execute(self, decision) -> None: ...
 
 
-def _build_scanner(on_signal) -> UpbitScanner | BinanceScanner:
+def _build_scanner(on_signal):
     """ACTIVE_EXCHANGE 설정에 따라 적절한 스캐너 인스턴스를 생성합니다."""
     exchange = settings.active_exchange
     if exchange == "upbit":
+        from src.data.upbit_scanner import UpbitScanner
         logger.info("factory.scanner", selected="UpbitScanner")
         return UpbitScanner(on_signal=on_signal)
     elif exchange == "binance":
+        from src.data.binance_scanner import BinanceScanner
         logger.info("factory.scanner", selected="BinanceScanner")
         return BinanceScanner(on_signal=on_signal)
     raise ValueError(
@@ -89,13 +87,15 @@ def _build_scanner(on_signal) -> UpbitScanner | BinanceScanner:
     )
 
 
-def _build_trader() -> UpbitTrader | BinanceTrader:
+def _build_trader():
     """ACTIVE_EXCHANGE 설정에 따라 적절한 트레이더 인스턴스를 생성합니다."""
     exchange = settings.active_exchange
     if exchange == "upbit":
+        from src.execution.trader import UpbitTrader
         logger.info("factory.trader", selected="UpbitTrader")
         return UpbitTrader()
     elif exchange == "binance":
+        from src.execution.binance_trader import BinanceTrader
         logger.info("factory.trader", selected="BinanceTrader")
         return BinanceTrader()
     raise ValueError(
