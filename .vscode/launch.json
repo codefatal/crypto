@@ -1,0 +1,78 @@
+{
+  // VSCode Run & Debug 탭에서 F5 또는 ▶ 버튼으로 실행
+  // 가상환경(.venv)이 프로젝트 루트에 있으면 VSCode가 자동 감지합니다.
+  // 다른 경로를 사용한다면 "python" 필드에 인터프리터 전체 경로를 지정하세요.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run AutoCrypto Bot",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      // 가상환경 자동 감지: .venv, venv, env 폴더 순서로 탐색
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      // .env 파일을 자동으로 로드 (python-dotenv와 동일한 효과)
+      "envFile": "${workspaceFolder}/.env",
+      // 프로젝트 루트를 작업 디렉토리로 설정 (SQLite DB 파일 위치 결정)
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      // 디버그 시 asyncio 내부 예외도 추적 가능하도록 설정
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONASYNCIODEBUG": "0"
+      }
+    },
+    {
+      // DryRun 모드 강제 실행 (실수로 실거래 방지)
+      "name": "Run AutoCrypto Bot (DryRun 강제)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "TRADE_ENABLED": "false",
+        "LOG_LEVEL": "DEBUG"
+      }
+    },
+    {
+      // 업비트 전환 단축 실행
+      "name": "Run AutoCrypto Bot (Upbit)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "ACTIVE_EXCHANGE": "upbit",
+        "TRADE_ENABLED": "false"
+      }
+    },
+    {
+      // 바이낸스 전환 단축 실행
+      "name": "Run AutoCrypto Bot (Binance)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "ACTIVE_EXCHANGE": "binance",
+        "TRADE_ENABLED": "false"
+      }
+    }
+  ]
+}

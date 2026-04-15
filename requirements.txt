@@ -1,0 +1,45 @@
+# Exchange Connectors
+pyupbit==0.2.33           # 업비트
+python-binance==1.0.36    # 바이낸스 (1.0.19: dateparser→regex Python 3.14 호환 문제 수정)
+websockets==12.0          # pyupbit 0.2.33 호환 버전 (13.0+은 legacy API 제거로 비호환)
+
+# Technical Analysis
+pandas>=3.0.2             # Python 3.14+: pre-built wheel 필요 (--only-binary)
+numpy>=2.2.0
+
+# AI / LLM
+openai>=1.57.2            # Groq API는 OpenAI 호환 엔드포인트 사용
+jsonschema>=4.23.0
+
+# Database
+sqlalchemy>=2.0.36        # SQLite(로컬) / PostgreSQL(운영) 모두 지원
+alembic>=1.13.3
+psycopg2-binary>=2.9.10   # PostgreSQL 사용 시에만 필요 (로컬은 없어도 됨)
+
+# Notifications
+discord-webhook>=1.3.1
+python-telegram-bot>=21.6
+
+# News / HTTP
+httpx>=0.27.2
+aiohttp>=3.10.10
+feedparser>=6.0.11
+
+# Config & Utilities
+python-dotenv>=1.0.1
+pydantic>=2.9.2
+pydantic-settings>=2.6.1
+structlog>=24.4.0
+tenacity>=9.0.0
+
+# Async
+asyncio-throttle>=1.0.2
+
+# AWS / Deploy
+boto3>=1.35.72
+
+# Dev / Testing
+pytest>=8.3.3
+pytest-asyncio>=0.24.0
+black>=24.10.0
+ruff>=0.7.4

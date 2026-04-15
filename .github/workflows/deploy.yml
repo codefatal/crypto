@@ -1,0 +1,219 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run mode (no actual trades)'
+        type: boolean
+        default: true
+
+env:
+  PYTHON_VERSION: '3.12'
+  APP_DIR: /opt/autocrypto
+  SERVICE_NAME: autocrypto
+
+jobs:
+  # ── 1. 코드 품질 검사 ─────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint deps
+        run: pip install ruff black
+
+      - name: Ruff check
+        run: ruff check src/ main.py config/
+
+      - name: Black format check
+        run: black --check src/ main.py config/
+
+  # ── 2. 테스트 ─────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: autocrypto_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      BINANCE_API_KEY: test_key
+      BINANCE_SECRET_KEY: test_secret
+      ANTHROPIC_API_KEY: test_key
+      DATABASE_URL: postgresql+psycopg2://test:test@localhost:5432/autocrypto_test
+      TRADE_ENABLED: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ── 3. Docker 이미지 빌드 & ECR 푸시 ─────────────────────────────
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_sha: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/autocrypto
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 4. EC2 배포 ───────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: |
+            IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/autocrypto:sha-${{ github.sha }}
+            APP_DIR=${{ env.APP_DIR }}
+            SERVICE_NAME=${{ env.SERVICE_NAME }}
+          script: |
+            set -e
+            echo "=== Deploying $IMAGE_URI ==="
+
+            # ECR 로그인
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin \
+                ${{ steps.login-ecr.outputs.registry }}
+
+            # 새 이미지 Pull
+            docker pull "$IMAGE_URI"
+
+            # systemd 서비스 파일 생성 (최초 1회)
+            cat > /tmp/autocrypto.service << 'SVCEOF'
+            [Unit]
+            Description=AutoCrypto Trading Bot
+            After=docker.service
+            Requires=docker.service
+
+            [Service]
+            Restart=always
+            RestartSec=10
+            EnvironmentFile=/opt/autocrypto/.env
+            ExecStartPre=-/usr/bin/docker stop autocrypto
+            ExecStartPre=-/usr/bin/docker rm autocrypto
+            ExecStart=/usr/bin/docker run --rm --name autocrypto \
+              --env-file /opt/autocrypto/.env \
+              --network host \
+              --log-driver json-file \
+              --log-opt max-size=50m \
+              --log-opt max-file=3 \
+              $IMAGE_URI
+
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+
+            sudo mv /tmp/autocrypto.service /etc/systemd/system/autocrypto.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable autocrypto
+
+            # IMAGE_URI를 서비스에 반영하기 위해 환경 변수 업데이트
+            echo "IMAGE_URI=$IMAGE_URI" | sudo tee -a /opt/autocrypto/.env.deploy
+
+            # 서비스 재시작
+            sudo systemctl restart autocrypto
+
+            # 헬스 체크 (30초 대기)
+            sleep 30
+            if sudo systemctl is-active autocrypto; then
+              echo "✅ Deploy successful"
+            else
+              echo "❌ Deploy failed — rolling back"
+              sudo journalctl -u autocrypto --no-pager -n 50
+              exit 1
+            fi
+
+      - name: Notify deployment
+        if: always()
+        uses: appleboy/telegram-action@v1
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            ${{ job.status == 'success' && '✅' || '❌' }} AutoCrypto Deploy ${{ job.status }}
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            Actor: ${{ github.actor }}
