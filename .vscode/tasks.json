@@ -2,10 +2,8 @@
   "version": "2.0.0",
   "tasks": [
     {
-      // F5(attach) 전에 자동 실행 — 봇을 debugpy listen 모드로 띄웁니다.
-      // DEBUGPY_PORT=5678 을 받아 debugpy.listen() → wait_for_client() 진입.
-      // problemMatcher.background.endsPattern 이 출력되면 VSCode가 attach를 시작합니다.
-      "label": "start-bot-for-debug",
+      // F5(attach) 기본 — 15분봉 (기본값)
+      "label": "start-bot-minute15",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe",
       "args": ["-Xfrozen_modules=off", "${workspaceFolder}/main.py"],
@@ -13,26 +11,104 @@
         "cwd": "${workspaceFolder}",
         "env": {
           "DEBUGPY_PORT": "5678",
-          "PYTHONPATH": "${workspaceFolder}"
+          "PYTHONPATH": "${workspaceFolder}",
+          "TIMEFRAME": "minute15"
         }
       },
       "isBackground": true,
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated"
-      },
+      "presentation": { "reveal": "always", "panel": "dedicated" },
       "problemMatcher": {
         "owner": "autocrypto-debug",
-        "pattern": {
-          "regexp": "^NOMATCH_PLACEHOLDER$",
-          "message": 1
-        },
+        "pattern": { "regexp": "^NOMATCH_PLACEHOLDER$", "message": 1 },
         "background": {
           "activeOnStart": true,
           "beginsPattern": "^\\[debugpy\\]",
           "endsPattern": "Waiting for attach"
         }
       }
+    },
+    {
+      // 1분봉
+      "label": "start-bot-minute1",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-Xfrozen_modules=off", "${workspaceFolder}/main.py"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DEBUGPY_PORT": "5679",
+          "PYTHONPATH": "${workspaceFolder}",
+          "TIMEFRAME": "minute1"
+        }
+      },
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": {
+        "owner": "autocrypto-debug-1m",
+        "pattern": { "regexp": "^NOMATCH_PLACEHOLDER$", "message": 1 },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[debugpy\\]",
+          "endsPattern": "Waiting for attach"
+        }
+      }
+    },
+    {
+      // 5분봉
+      "label": "start-bot-minute5",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-Xfrozen_modules=off", "${workspaceFolder}/main.py"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DEBUGPY_PORT": "5680",
+          "PYTHONPATH": "${workspaceFolder}",
+          "TIMEFRAME": "minute5"
+        }
+      },
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": {
+        "owner": "autocrypto-debug-5m",
+        "pattern": { "regexp": "^NOMATCH_PLACEHOLDER$", "message": 1 },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[debugpy\\]",
+          "endsPattern": "Waiting for attach"
+        }
+      }
+    },
+    {
+      // 1시간봉
+      "label": "start-bot-minute60",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-Xfrozen_modules=off", "${workspaceFolder}/main.py"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DEBUGPY_PORT": "5681",
+          "PYTHONPATH": "${workspaceFolder}",
+          "TIMEFRAME": "minute60"
+        }
+      },
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": {
+        "owner": "autocrypto-debug-60m",
+        "pattern": { "regexp": "^NOMATCH_PLACEHOLDER$", "message": 1 },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[debugpy\\]",
+          "endsPattern": "Waiting for attach"
+        }
+      }
+    },
+    {
+      // 이전 호환 alias (기존 tasks에서 start-bot-for-debug 참조 시)
+      "label": "start-bot-for-debug",
+      "dependsOn": "start-bot-minute15"
     }
   ]
 }

@@ -80,6 +80,14 @@ class Notifier:
             return_exceptions=True,
         )
 
+    async def send_news_digest(self, digest_text: str) -> None:
+        """시작 시 뉴스 다이제스트를 Discord + Telegram으로 발송"""
+        await asyncio.gather(
+            self._discord_plain(digest_text[:2000], self._settings.discord_webhook_url),
+            self._telegram_plain(digest_text[:4096]),
+            return_exceptions=True,
+        )
+
     # ── Discord ───────────────────────────────────────────────────────
 
     async def _discord_signal(self, decision: AIDecision) -> None:

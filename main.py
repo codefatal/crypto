@@ -131,6 +131,30 @@ def _exchange_display() -> dict[str, str]:
     }
 
 
+def _format_news_digest(news_ctx: NewsContext) -> str:
+    """뉴스 다이제스트 텍스트 포맷 (Discord/Telegram 공용)"""
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    lines = [f"📰 **뉴스 다이제스트** ({today})"]
+
+    # 공포탐욕 지수
+    fg = news_ctx.fear_greed
+    if fg.score >= 0:
+        emoji = "😱" if fg.score < 25 else "😨" if fg.score < 45 else "😐" if fg.score < 55 else "😏" if fg.score < 75 else "🤑"
+        lines.append(f"\n{emoji} **공포탐욕 지수**: {fg.score}/100 — {fg.label}")
+
+    # 글로벌 헤드라인
+    if news_ctx.global_headlines:
+        lines.append(f"\n🌍 **글로벌 헤드라인**\n{news_ctx.global_headlines[:800]}")
+
+    # 네이버 뉴스 (상위 5개)
+    if news_ctx.naver_items:
+        items = news_ctx.naver_items[:5]
+        naver_text = "\n".join(f"• {item.title}" for item in items)
+        lines.append(f"\n🇰🇷 **한국어 뉴스**\n{naver_text}")
+
+    return "\n".join(lines)
+
+
 # ── 메인 애플리케이션 ─────────────────────────────────────────────────
 
 class AutoCrypto:
@@ -163,6 +187,7 @@ class AutoCrypto:
             sys.exit(1)
 
         await self._trader.init()
+        await self._log_btc_snapshot()
 
         self._news_refresh_task = asyncio.create_task(self._news_refresh_loop())
         self._running = True
@@ -279,7 +304,9 @@ class AutoCrypto:
             )
 
     async def _news_refresh_loop(self) -> None:
-        """뉴스 + 공포·탐욕 지수를 scan_interval_sec마다 갱신"""
+        """뉴스 + 공포·탐욕 지수를 scan_interval_sec마다 갱신.
+        첫 번째 수집 완료 시 뉴스 다이제스트를 Discord + Telegram으로 발송합니다."""
+        first_run = True
         while self._running:
             try:
                 symbols = self._scanner.all_symbols()
@@ -292,9 +319,44 @@ class AutoCrypto:
                     naver=len(self._news_cache.naver_items),
                     fear_greed=self._news_cache.fear_greed.score,
                 )
+                if first_run:
+                    first_run = False
+                    digest = _format_news_digest(self._news_cache)
+                    asyncio.create_task(self._notifier.send_news_digest(digest))
             except Exception as exc:
                 logger.warning("news.refresh_failed", error=str(exc))
+                first_run = False
             await asyncio.sleep(settings.scan_interval_sec)
+
+    async def _log_btc_snapshot(self) -> None:
+        """시작 시 BTC 최신 데이터를 수집해 로그로 출력합니다.
+        데이터 파이프라인(pyupbit API 연결, OHLCV 파싱)이 정상인지 확인용."""
+        try:
+            import pyupbit
+            price: float | None = await asyncio.to_thread(
+                pyupbit.get_current_price, "KRW-BTC"
+            )
+            df = await asyncio.to_thread(
+                pyupbit.get_ohlcv, "KRW-BTC",
+                interval=settings.timeframe, count=2,
+            )
+            if price and df is not None and not df.empty:
+                c = df.iloc[-2]  # 완성된 최신 캔들 (마지막은 현재 형성 중)
+                logger.info(
+                    "btc.snapshot",
+                    live_price=f"{price:,.0f} KRW",
+                    candle_open=f"{float(c['open']):,.0f}",
+                    candle_high=f"{float(c['high']):,.0f}",
+                    candle_low=f"{float(c['low']):,.0f}",
+                    candle_close=f"{float(c['close']):,.0f}",
+                    volume_btc=f"{float(c['volume']):.4f}",
+                    volume_krw=f"{float(c['value']):,.0f}",
+                    timeframe=settings.timeframe,
+                )
+            else:
+                logger.warning("btc.snapshot_empty")
+        except Exception as exc:
+            logger.warning("btc.snapshot_failed", error=str(exc))
 
     async def _shutdown(self) -> None:
         logger.info("autocrypto.shutting_down", exchange=self._exchange)

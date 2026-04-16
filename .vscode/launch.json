@@ -1,66 +1,61 @@
 {
-  // VSCode Run & Debug 탭에서 F5 또는 ▶ 버튼으로 실행
-  // 가상환경(.venv)이 프로젝트 루트에 있으면 VSCode가 자동 감지합니다.
-  // 다른 경로를 사용한다면 "python" 필드에 인터프리터 전체 경로를 지정하세요.
+  // VSCode Run & Debug 탭(Ctrl+Shift+D)에서 드롭다운으로 타임프레임 선택 후 F5
+  // 모든 설정은 attach 모드 사용 (Python 3.14 + debugpy launch hang 우회)
   "version": "0.2.0",
   "configurations": [
     {
-      // F5 기본 실행 — Python 3.14 + debugpy launch 모드 hang 우회.
-      // preLaunchTask가 봇을 DEBUGPY_PORT=5678 로 먼저 띄운 뒤
-      // VSCode가 localhost:5678 로 attach합니다.
-      "name": "Run AutoCrypto Bot",
+      // ── 기본: 15분봉 ─────────────────────────────────────────────
+      "name": "AutoCrypto — 15분봉 (기본)",
       "type": "debugpy",
       "request": "attach",
-      "connect": {
-        "host": "localhost",
-        "port": 5678
-      },
-      "pathMappings": [
-        {
-          "localRoot": "${workspaceFolder}",
-          "remoteRoot": "${workspaceFolder}"
-        }
-      ],
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "${workspaceFolder}" }],
       "justMyCode": true,
-      "preLaunchTask": "start-bot-for-debug"
+      "preLaunchTask": "start-bot-minute15"
     },
     {
-      // DryRun 모드 강제 실행 (실수로 실거래 방지)
-      "name": "Run AutoCrypto Bot (DryRun 강제)",
+      // ── 1분봉 ────────────────────────────────────────────────────
+      "name": "AutoCrypto — 1분봉",
       "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.py",
-      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "console": "integratedTerminal",
-      "envFile": "${workspaceFolder}/.env",
-      "cwd": "${workspaceFolder}",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5679 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "${workspaceFolder}" }],
       "justMyCode": true,
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}",
-        "TRADE_ENABLED": "false",
-        "LOG_LEVEL": "DEBUG"
-      }
+      "preLaunchTask": "start-bot-minute1"
     },
     {
-      // 업비트 전환 단축 실행
-      "name": "Run AutoCrypto Bot (Upbit)",
+      // ── 5분봉 ────────────────────────────────────────────────────
+      "name": "AutoCrypto — 5분봉",
       "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.py",
-      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "console": "integratedTerminal",
-      "envFile": "${workspaceFolder}/.env",
-      "cwd": "${workspaceFolder}",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5680 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "${workspaceFolder}" }],
       "justMyCode": true,
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}",
-        "ACTIVE_EXCHANGE": "upbit",
-        "TRADE_ENABLED": "false"
-      }
+      "preLaunchTask": "start-bot-minute5"
     },
     {
-      // 바이낸스 전환 단축 실행
-      "name": "Run AutoCrypto Bot (Binance)",
+      // ── 1시간봉 ──────────────────────────────────────────────────
+      "name": "AutoCrypto — 1시간봉",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5681 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "${workspaceFolder}" }],
+      "justMyCode": true,
+      "preLaunchTask": "start-bot-minute60"
+    },
+    {
+      // ── DryRun (DEBUG 로그) ───────────────────────────────────────
+      "name": "AutoCrypto — DryRun (DEBUG 로그)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "${workspaceFolder}" }],
+      "justMyCode": true,
+      "preLaunchTask": "start-bot-minute15"
+    },
+    {
+      // ── 바이낸스 ─────────────────────────────────────────────────
+      "name": "AutoCrypto — Binance 15분봉",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",

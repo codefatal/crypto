@@ -23,6 +23,7 @@ API 구성:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -139,6 +140,9 @@ class AIAnalyzer:
             base_url=self._settings.groq_base_url,
         )
         self._system_prompt = _build_system_prompt()
+        # Groq 무료 티어: 12,000 TPM. 콜당 ~1,800 토큰 → 동시 4개로 제한
+        # 캔들 경계에 수십 개 심볼이 동시 실행돼도 TPM 한도를 넘지 않도록 조절
+        self._semaphore = asyncio.Semaphore(4)
 
     async def analyze(
         self,
@@ -214,6 +218,14 @@ class AIAnalyzer:
             except Exception as exc:
                 last_error = f"API 호출 실패: {exc}"
                 logger.error("ai.api_error", symbol=symbol, attempt=attempt, error=last_error)
+                # 429 Rate Limit: 에러 메시지에서 재시도 대기 시간을 파싱해 sleep
+                # Groq 오류 형식: "Please try again in 6.915s."
+                exc_str = str(exc)
+                if "429" in exc_str or "rate_limit_exceeded" in exc_str:
+                    m = re.search(r"try again in (\d+\.?\d*)s", exc_str)
+                    wait_sec = float(m.group(1)) + 1.0 if m else 10.0
+                    logger.info("ai.rate_limited", symbol=symbol, wait_sec=round(wait_sec, 1))
+                    await asyncio.sleep(wait_sec)
                 if attempt < max_retries:
                     messages = self._append_retry_messages(messages, "", last_error)
                 continue
@@ -309,16 +321,18 @@ class AIAnalyzer:
         """
         Groq API (OpenAI 호환 엔드포인트)를 통해 텍스트를 반환합니다.
         temperature=0.1로 설정하여 JSON 출력 형식 일관성 극대화.
+        Semaphore(4)로 동시 호출을 제한하여 TPM(분당 토큰) 한도 초과를 방지합니다.
         """
-        response = await self._client.chat.completions.create(
-            model=self._settings.ai_model,
-            max_tokens=self._settings.ai_max_tokens,
-            temperature=self._settings.ai_temperature,
-            messages=[
-                {"role": "system", "content": self._system_prompt},
-                *messages,
-            ],
-        )
+        async with self._semaphore:
+            response = await self._client.chat.completions.create(
+                model=self._settings.ai_model,
+                max_tokens=self._settings.ai_max_tokens,
+                temperature=self._settings.ai_temperature,
+                messages=[
+                    {"role": "system", "content": self._system_prompt},
+                    *messages,
+                ],
+            )
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("Groq API가 빈 응답을 반환했습니다")
