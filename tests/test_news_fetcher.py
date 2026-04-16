@@ -102,32 +102,99 @@ class TestNewsContextGlobalItems:
 # ── fetch_btc_dominance ───────────────────────────────────────────────────────
 
 class TestFetchBtcDominance:
-    @pytest.mark.asyncio
-    async def test_success(self):
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "data": {
-                "market_cap_percentage": {"btc": 52.3, "eth": 17.1},
-                "total_market_cap": {"usd": 2_500_000_000_000.0},
-                "market_cap_change_percentage_24h_usd": 1.5,
-            }
+    def _make_coinpaprika_mocks(self, btc_dom=52.3, total_mcap=2.5e12, mcap_change=1.5, eth_mcap=4.275e11):
+        """Coinpaprika global + ETH ticker mock 응답 생성"""
+        global_resp = MagicMock()
+        global_resp.raise_for_status = MagicMock()
+        global_resp.json.return_value = {
+            "bitcoin_dominance_percentage": btc_dom,
+            "market_cap_usd": total_mcap,
+            "market_cap_change_24h": mcap_change,
         }
+
+        eth_resp = MagicMock()
+        eth_resp.raise_for_status = MagicMock()
+        eth_resp.json.return_value = {
+            "quotes": {"USD": {"market_cap": eth_mcap}}
+        }
+        return global_resp, eth_resp
+
+    @pytest.mark.asyncio
+    async def test_success_via_coinpaprika(self):
+        """Coinpaprika primary 소스로 정상 수신"""
+        global_resp, eth_resp = self._make_coinpaprika_mocks(
+            btc_dom=52.3, total_mcap=2.5e12, mcap_change=1.5, eth_mcap=4.275e11
+        )
 
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.get = AsyncMock(return_value=mock_response)
+        # gather 호출 순서: global, eth
+        mock_client.get = AsyncMock(side_effect=[global_resp, eth_resp])
 
         with patch("src.data.news_fetcher.httpx.AsyncClient", return_value=mock_client):
             result = await fetch_btc_dominance()
 
         assert result.btc_dominance == 52.3
-        assert result.eth_dominance == 17.1
         assert result.market_cap_change_24h == 1.5
+        # ETH: 427.5B / 2500B * 100 = 17.1%
+        assert result.eth_dominance == pytest.approx(17.1, abs=0.1)
 
     @pytest.mark.asyncio
-    async def test_returns_unknown_on_error(self):
+    async def test_coinpaprika_zero_falls_through_to_coingecko(self):
+        """Coinpaprika가 btc_dominance=0 반환 시 CoinGecko fallback 사용"""
+        # First call: Coinpaprika global (btc=0 → fallback 트리거)
+        paprika_resp = MagicMock()
+        paprika_resp.raise_for_status = MagicMock()
+        paprika_resp.json.return_value = {
+            "bitcoin_dominance_percentage": 0.0,
+            "market_cap_usd": 0.0,
+            "market_cap_change_24h": 0.0,
+        }
+        eth_resp = MagicMock()
+        eth_resp.raise_for_status = MagicMock()
+        eth_resp.json.return_value = {"quotes": {"USD": {"market_cap": 0.0}}}
+
+        # Second AsyncClient call: CoinGecko
+        gecko_resp = MagicMock()
+        gecko_resp.raise_for_status = MagicMock()
+        gecko_resp.json.return_value = {
+            "data": {
+                "market_cap_percentage": {"btc": 55.0, "eth": 18.0},
+                "total_market_cap": {"usd": 2_600_000_000_000.0},
+                "market_cap_change_percentage_24h_usd": 2.0,
+            }
+        }
+
+        call_count = 0
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def get(self, url, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if "coinpaprika.com/v1/global" in url:
+                    return paprika_resp
+                if "eth-ethereum" in url:
+                    return eth_resp
+                if "coingecko" in url:
+                    return gecko_resp
+                raise Exception(f"unexpected url: {url}")
+
+        with patch("src.data.news_fetcher.httpx.AsyncClient", FakeClient):
+            result = await fetch_btc_dominance()
+
+        assert result.btc_dominance == 55.0
+        assert result.eth_dominance == 18.0
+
+    @pytest.mark.asyncio
+    async def test_returns_unknown_when_all_sources_fail(self):
+        """모든 소스 실패 시 DominanceData.unknown() 반환"""
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)

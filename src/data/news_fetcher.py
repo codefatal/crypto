@@ -43,7 +43,11 @@ _GLOBAL_RSS_PER_SOURCE = 5  # 소스당 최대 기사 수
 # ── 공포·탐욕 지수 API ────────────────────────────────────────────────
 _FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
 
-# ── BTC 도미넌스 API (CoinGecko free, 인증 불필요) ────────────────────
+# ── BTC 도미넌스 API ──────────────────────────────────────────────────
+# Primary: Coinpaprika (무료, 인증 불필요, 안정적)
+_COINPAPRIKA_GLOBAL_URL = "https://api.coinpaprika.com/v1/global"
+_COINPAPRIKA_ETH_URL = "https://api.coinpaprika.com/v1/tickers/eth-ethereum"
+# Fallback: CoinGecko (rate limit 걸릴 수 있음)
 _COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
 # ── 코인 심볼 → 한국어 검색 키워드 ─────────────────────────────────────
@@ -297,10 +301,65 @@ async def fetch_fear_and_greed_index() -> FearGreedData:
 
 async def fetch_btc_dominance() -> DominanceData:
     """
-    CoinGecko /global 엔드포인트에서 BTC/ETH 도미넌스를 조회합니다.
+    BTC/ETH 도미넌스를 조회합니다.
 
-    인증/API 키 불필요. 실패 시 DominanceData.unknown() 반환.
+    Primary  : Coinpaprika (무료, 인증 불필요, 안정적)
+    Fallback : CoinGecko   (rate limit 걸릴 경우 대비)
+
+    두 소스 모두 실패 시 DominanceData.unknown() 반환.
     """
+    # ── Primary: Coinpaprika ────────────────────────────────────────
+    try:
+        _headers = {"User-Agent": "AutoCrypto/1.0"}
+        async with httpx.AsyncClient(timeout=10) as client:
+            global_resp, eth_resp = await asyncio.gather(
+                client.get(_COINPAPRIKA_GLOBAL_URL, headers=_headers),
+                client.get(_COINPAPRIKA_ETH_URL, headers=_headers),
+                return_exceptions=True,
+            )
+
+        if isinstance(global_resp, Exception):
+            raise global_resp
+        global_resp.raise_for_status()
+        gdata = global_resp.json()
+
+        btc_dom = round(float(gdata.get("bitcoin_dominance_percentage", 0.0)), 2)
+        total_mcap = float(gdata.get("market_cap_usd", 0.0))
+        mcap_change = round(float(gdata.get("market_cap_change_24h", 0.0)), 2)
+
+        # ETH 도미넌스: ETH 시총 / 전체 시총
+        eth_dom = 0.0
+        if not isinstance(eth_resp, Exception):
+            try:
+                eth_resp.raise_for_status()
+                eth_mcap = float(
+                    eth_resp.json().get("quotes", {}).get("USD", {}).get("market_cap", 0.0)
+                )
+                if total_mcap > 0 and eth_mcap > 0:
+                    eth_dom = round(eth_mcap / total_mcap * 100, 2)
+            except Exception:
+                pass
+
+        if btc_dom > 0:
+            logger.info(
+                "dominance.fetched",
+                source="coinpaprika",
+                btc=btc_dom,
+                eth=eth_dom,
+                total_mcap_b=round(total_mcap / 1e9, 1),
+            )
+            return DominanceData(
+                btc_dominance=btc_dom,
+                eth_dominance=eth_dom,
+                total_market_cap_usd=total_mcap,
+                market_cap_change_24h=mcap_change,
+                updated_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
+
+    except Exception as exc:
+        logger.debug("dominance.coinpaprika_failed", error=str(exc))
+
+    # ── Fallback: CoinGecko ─────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -315,25 +374,28 @@ async def fetch_btc_dominance() -> DominanceData:
         eth_dom = round(float(dom.get("eth", 0.0)), 2)
         total_mcap = float(data.get("total_market_cap", {}).get("usd", 0.0))
         mcap_change = round(float(data.get("market_cap_change_percentage_24h_usd", 0.0)), 2)
-        updated_at = datetime.now(tz=timezone.utc).isoformat()
 
-        logger.info(
-            "dominance.fetched",
-            btc=btc_dom,
-            eth=eth_dom,
-            total_mcap_b=round(total_mcap / 1e9, 1),
-        )
-        return DominanceData(
-            btc_dominance=btc_dom,
-            eth_dominance=eth_dom,
-            total_market_cap_usd=total_mcap,
-            market_cap_change_24h=mcap_change,
-            updated_at=updated_at,
-        )
+        if btc_dom > 0:
+            logger.info(
+                "dominance.fetched",
+                source="coingecko",
+                btc=btc_dom,
+                eth=eth_dom,
+                total_mcap_b=round(total_mcap / 1e9, 1),
+            )
+            return DominanceData(
+                btc_dominance=btc_dom,
+                eth_dominance=eth_dom,
+                total_market_cap_usd=total_mcap,
+                market_cap_change_24h=mcap_change,
+                updated_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
 
     except Exception as exc:
-        logger.warning("dominance.failed", error=str(exc))
-        return DominanceData.unknown()
+        logger.debug("dominance.coingecko_failed", error=str(exc))
+
+    logger.warning("dominance.all_sources_failed")
+    return DominanceData.unknown()
 
 
 # ── NewsFetcher 클래스 ────────────────────────────────────────────────
