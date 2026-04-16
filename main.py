@@ -308,6 +308,10 @@ class AutoCrypto:
 
 
 async def main() -> None:
+    # Python 3.14 asyncio 슬로우 콜백 경고 임계값 상향 (기본 0.1s → 10s)
+    # 네트워크 I/O 작업이 100ms를 넘으면 경고가 쏟아지므로 억제
+    asyncio.get_running_loop().slow_callback_duration = 10.0
+
     app = AutoCrypto()
 
     loop = asyncio.get_running_loop()
