@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // F5(attach) 전에 자동 실행 — 봇을 debugpy listen 모드로 띄웁니다.
+      // DEBUGPY_PORT=5678 을 받아 debugpy.listen() → wait_for_client() 진입.
+      // problemMatcher.background.endsPattern 이 출력되면 VSCode가 attach를 시작합니다.
+      "label": "start-bot-for-debug",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["${workspaceFolder}/main.py"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DEBUGPY_PORT": "5678",
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": {
+        "owner": "autocrypto-debug",
+        "pattern": {
+          "regexp": "^NOMATCH_PLACEHOLDER$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[debugpy\\]",
+          "endsPattern": "Waiting for attach"
+        }
+      }
+    }
+  ]
+}

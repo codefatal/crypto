@@ -22,6 +22,7 @@ env/
 .idea/
 .vscode/*.json
 !.vscode/launch.json
+!.vscode/tasks.json
 
 # Claude
 .claude/

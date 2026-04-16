@@ -5,23 +5,24 @@
   "version": "0.2.0",
   "configurations": [
     {
+      // F5 기본 실행 — Python 3.14 + debugpy launch 모드 hang 우회.
+      // preLaunchTask가 봇을 DEBUGPY_PORT=5678 로 먼저 띄운 뒤
+      // VSCode가 localhost:5678 로 attach합니다.
       "name": "Run AutoCrypto Bot",
       "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.py",
-      // 가상환경 자동 감지: .venv, venv, env 폴더 순서로 탐색
-      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "console": "integratedTerminal",
-      // .env 파일을 자동으로 로드 (python-dotenv와 동일한 효과)
-      "envFile": "${workspaceFolder}/.env",
-      // 프로젝트 루트를 작업 디렉토리로 설정 (SQLite DB 파일 위치 결정)
-      "cwd": "${workspaceFolder}",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}",
+          "remoteRoot": "${workspaceFolder}"
+        }
+      ],
       "justMyCode": true,
-      // 디버그 시 asyncio 내부 예외도 추적 가능하도록 설정
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}",
-        "PYTHONASYNCIODEBUG": "0"
-      }
+      "preLaunchTask": "start-bot-for-debug"
     },
     {
       // DryRun 모드 강제 실행 (실수로 실거래 방지)

@@ -16,6 +16,7 @@ AutoCrypto — 메인 진입점
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -331,4 +332,15 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # ── debugpy attach 모드 (F5 디버깅용) ──────────────────────────────
+    # Python 3.14 + debugpy launch 모드는 wait_for_ready_to_run() hang 발생.
+    # DEBUGPY_PORT 환경변수가 있으면 우리 프로세스가 먼저 시작한 뒤
+    # VSCode가 attach하는 방식으로 우회합니다.
+    _dbg_port = os.environ.get("DEBUGPY_PORT")
+    if _dbg_port:
+        import debugpy  # type: ignore[import]
+        debugpy.listen(("localhost", int(_dbg_port)))
+        print(f"[debugpy] Waiting for attach on localhost:{_dbg_port} ...", flush=True)
+        debugpy.wait_for_client()
+
     asyncio.run(main())
