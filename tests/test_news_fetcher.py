@@ -102,60 +102,42 @@ class TestNewsContextGlobalItems:
 # ── fetch_btc_dominance ───────────────────────────────────────────────────────
 
 class TestFetchBtcDominance:
-    def _make_coinpaprika_mocks(self, btc_dom=52.3, total_mcap=2.5e12, mcap_change=1.5, eth_mcap=4.275e11):
-        """Coinpaprika global + ETH ticker mock 응답 생성"""
-        global_resp = MagicMock()
-        global_resp.raise_for_status = MagicMock()
-        global_resp.json.return_value = {
-            "bitcoin_dominance_percentage": btc_dom,
-            "market_cap_usd": total_mcap,
-            "market_cap_change_24h": mcap_change,
-        }
-
-        eth_resp = MagicMock()
-        eth_resp.raise_for_status = MagicMock()
-        eth_resp.json.return_value = {
-            "quotes": {"USD": {"market_cap": eth_mcap}}
-        }
-        return global_resp, eth_resp
-
     @pytest.mark.asyncio
-    async def test_success_via_coinpaprika(self):
-        """Coinpaprika primary 소스로 정상 수신"""
-        global_resp, eth_resp = self._make_coinpaprika_mocks(
-            btc_dom=52.3, total_mcap=2.5e12, mcap_change=1.5, eth_mcap=4.275e11
-        )
-
+    async def test_success_via_alternative_me(self):
+        """alternative.me primary 소스로 정상 수신"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {
+                "bitcoin_percentage_of_market_cap": 0.523,   # fraction → 52.3%
+                "quotes": {"USD": {"total_market_cap": 2_500_000_000_000.0}},
+            }
+        }
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
-        # gather 호출 순서: global, eth
-        mock_client.get = AsyncMock(side_effect=[global_resp, eth_resp])
+        mock_client.get = AsyncMock(return_value=mock_resp)
 
         with patch("src.data.news_fetcher.httpx.AsyncClient", return_value=mock_client):
             result = await fetch_btc_dominance()
 
         assert result.btc_dominance == 52.3
-        assert result.market_cap_change_24h == 1.5
-        # ETH: 427.5B / 2500B * 100 = 17.1%
-        assert result.eth_dominance == pytest.approx(17.1, abs=0.1)
+        assert result.total_market_cap_usd == 2_500_000_000_000.0
+        # alternative.me는 ETH 제공 안 함
+        assert result.eth_dominance == 0.0
 
     @pytest.mark.asyncio
-    async def test_coinpaprika_zero_falls_through_to_coingecko(self):
-        """Coinpaprika가 btc_dominance=0 반환 시 CoinGecko fallback 사용"""
-        # First call: Coinpaprika global (btc=0 → fallback 트리거)
-        paprika_resp = MagicMock()
-        paprika_resp.raise_for_status = MagicMock()
-        paprika_resp.json.return_value = {
-            "bitcoin_dominance_percentage": 0.0,
-            "market_cap_usd": 0.0,
-            "market_cap_change_24h": 0.0,
+    async def test_alternative_me_zero_falls_through_to_coingecko(self):
+        """alternative.me가 btc=0 반환 시 CoinGecko fallback 사용"""
+        alt_resp = MagicMock()
+        alt_resp.raise_for_status = MagicMock()
+        alt_resp.json.return_value = {
+            "data": {
+                "bitcoin_percentage_of_market_cap": 0.0,
+                "quotes": {"USD": {"total_market_cap": 0.0}},
+            }
         }
-        eth_resp = MagicMock()
-        eth_resp.raise_for_status = MagicMock()
-        eth_resp.json.return_value = {"quotes": {"USD": {"market_cap": 0.0}}}
 
-        # Second AsyncClient call: CoinGecko
         gecko_resp = MagicMock()
         gecko_resp.raise_for_status = MagicMock()
         gecko_resp.json.return_value = {
@@ -166,8 +148,6 @@ class TestFetchBtcDominance:
             }
         }
 
-        call_count = 0
-
         class FakeClient:
             def __init__(self, **kwargs):
                 pass
@@ -176,12 +156,10 @@ class TestFetchBtcDominance:
             async def __aexit__(self, *a):
                 pass
             async def get(self, url, **kwargs):
-                nonlocal call_count
-                call_count += 1
-                if "coinpaprika.com/v1/global" in url:
-                    return paprika_resp
-                if "eth-ethereum" in url:
-                    return eth_resp
+                if "alternative.me" in url:
+                    return alt_resp
+                if "coinpaprika" in url:
+                    raise Exception("coinpaprika unavailable")
                 if "coingecko" in url:
                     return gecko_resp
                 raise Exception(f"unexpected url: {url}")

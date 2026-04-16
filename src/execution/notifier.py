@@ -151,30 +151,37 @@ class Notifier:
         if not webhook_url:
             return
 
-        change_emoji = "📈" if data.market_cap_change_24h >= 0 else "📉"
         total_b = data.total_market_cap_usd / 1e9
+
+        fields = [
+            {
+                "name": "₿ BTC 도미넌스",
+                "value": f"**{data.btc_dominance:.2f}%**",
+                "inline": True,
+            },
+        ]
+        if data.eth_dominance > 0:
+            fields.append({
+                "name": "Ξ ETH 도미넌스",
+                "value": f"**{data.eth_dominance:.2f}%**",
+                "inline": True,
+            })
+        if total_b > 0:
+            change_str = ""
+            if data.market_cap_change_24h != 0:
+                change_emoji = "📈" if data.market_cap_change_24h > 0 else "📉"
+                change_str = f" ({change_emoji} {data.market_cap_change_24h:+.2f}% 24h)"
+            fields.append({
+                "name": "💰 전체 시총",
+                "value": f"${total_b:,.1f}B{change_str}",
+                "inline": False,
+            })
 
         embed = {
             "title": "🌐 BTC 도미넌스 리포트",
             "color": 0xF7931A,
             "timestamp": data.updated_at or datetime.now(tz=timezone.utc).isoformat(),
-            "fields": [
-                {
-                    "name": "₿ BTC 도미넌스",
-                    "value": f"**{data.btc_dominance:.2f}%**",
-                    "inline": True,
-                },
-                {
-                    "name": "Ξ ETH 도미넌스",
-                    "value": f"**{data.eth_dominance:.2f}%**",
-                    "inline": True,
-                },
-                {
-                    "name": f"{change_emoji} 전체 시총",
-                    "value": f"${total_b:,.1f}B ({data.market_cap_change_24h:+.2f}% 24h)",
-                    "inline": False,
-                },
-            ],
+            "fields": fields,
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
 
@@ -313,16 +320,22 @@ class Notifier:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
 
-        change_emoji = "📈" if data.market_cap_change_24h >= 0 else "📉"
         total_b = data.total_market_cap_usd / 1e9
 
-        text = (
-            f"🌐 *BTC 도미넌스 리포트*\n\n"
-            f"₿ BTC 도미넌스: `{data.btc_dominance:.2f}%`\n"
-            f"Ξ ETH 도미넌스: `{data.eth_dominance:.2f}%`\n"
-            f"{change_emoji} 전체 시총: `${total_b:,.1f}B` ({data.market_cap_change_24h:+.2f}% 24h)"
-        )
-        await self._telegram_plain(text)
+        lines = [
+            "🌐 *BTC 도미넌스 리포트*\n",
+            f"₿ BTC 도미넌스: `{data.btc_dominance:.2f}%`",
+        ]
+        if data.eth_dominance > 0:
+            lines.append(f"Ξ ETH 도미넌스: `{data.eth_dominance:.2f}%`")
+        if total_b > 0:
+            change_str = ""
+            if data.market_cap_change_24h != 0:
+                change_emoji = "📈" if data.market_cap_change_24h > 0 else "📉"
+                change_str = f" ({change_emoji} {data.market_cap_change_24h:+.2f}% 24h)"
+            lines.append(f"💰 전체 시총: `${total_b:,.1f}B`{change_str}")
+
+        await self._telegram_plain("\n".join(lines))
 
     async def _telegram_plain(self, text: str) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
