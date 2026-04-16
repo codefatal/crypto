@@ -155,7 +155,10 @@ def _format_news_digest(news_ctx: NewsContext) -> str:
     # 네이버 뉴스 (상위 5개)
     if news_ctx.naver_items:
         items = news_ctx.naver_items[:5]
-        naver_text = "\n".join(f"• {item.title}" for item in items)
+        naver_text = "\n".join(
+            f"• [{item.title}]({item.url})" if item.url else f"• {item.title}"
+            for item in items
+        )
         lines.append(f"\n🇰🇷 **한국어 뉴스**\n{naver_text}")
 
     return "\n".join(lines)

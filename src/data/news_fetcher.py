@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -80,7 +81,8 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _strip_html(text: str) -> str:
-    return _HTML_TAG_RE.sub("", text).strip()
+    """HTML 태그 제거 후 엔티티(&quot; &amp; &#39; 등) 디코딩"""
+    return html.unescape(_HTML_TAG_RE.sub("", text)).strip()
 
 
 # ── 데이터 클래스 ─────────────────────────────────────────────────────
