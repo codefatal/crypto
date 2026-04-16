@@ -43,6 +43,9 @@ _GLOBAL_RSS_PER_SOURCE = 5  # 소스당 최대 기사 수
 # ── 공포·탐욕 지수 API ────────────────────────────────────────────────
 _FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
 
+# ── BTC 도미넌스 API (CoinGecko free, 인증 불필요) ────────────────────
+_COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
+
 # ── 코인 심볼 → 한국어 검색 키워드 ─────────────────────────────────────
 _KR_KEYWORD: dict[str, str] = {
     "BTC": "비트코인",
@@ -118,17 +121,38 @@ class FearGreedData:
 
 
 @dataclass
+class DominanceData:
+    """CoinGecko /global BTC 도미넌스"""
+    btc_dominance: float       # BTC 시총 점유율 (%)
+    eth_dominance: float       # ETH 시총 점유율 (%)
+    total_market_cap_usd: float
+    market_cap_change_24h: float  # 24h 전체 시총 변화율 (%)
+    updated_at: str = ""
+
+    @classmethod
+    def unknown(cls) -> "DominanceData":
+        return cls(
+            btc_dominance=0.0,
+            eth_dominance=0.0,
+            total_market_cap_usd=0.0,
+            market_cap_change_24h=0.0,
+        )
+
+
+@dataclass
 class NewsContext:
     """
     AI에 전달할 전체 뉴스 컨텍스트.
 
-    naver_items   : 네이버 뉴스 (한국어, 코인별 필터링 가능)
-    global_headlines : 글로벌 RSS 뉴스 제목 포맷 문자열
-    fear_greed    : alternative.me 공포·탐욕 지수
+    naver_items      : 네이버 뉴스 (한국어, 코인별 필터링 가능)
+    global_headlines : 글로벌 RSS 뉴스 제목 포맷 문자열 (AI 프롬프트용, URL 없음)
+    global_items     : 글로벌 RSS 뉴스 NewsItem 목록 (알림용, URL 포함)
+    fear_greed       : alternative.me 공포·탐욕 지수
     """
     naver_items: list[NewsItem]
-    global_headlines: str         # fetch_global_rss_news() 결과
+    global_headlines: str
     fear_greed: FearGreedData
+    global_items: list[NewsItem] = field(default_factory=list)
 
     def to_ai_context(self) -> str:
         """네이버 + 글로벌 RSS + 공포·탐욕 지수를 하나의 텍스트 블록으로 병합"""
@@ -146,7 +170,7 @@ class NewsContext:
             )
             parts.append(f"## 한국어 뉴스\n{naver_lines}")
 
-        # 3. 글로벌 RSS 뉴스
+        # 3. 글로벌 RSS 뉴스 (URL 없음 — 토큰 절약)
         if self.global_headlines:
             parts.append(f"## 글로벌 뉴스\n{self.global_headlines}")
 
@@ -163,6 +187,7 @@ class NewsContext:
             naver_items=filtered,
             global_headlines=self.global_headlines,
             fear_greed=self.fear_greed,
+            global_items=self.global_items,
         )
 
     @classmethod
@@ -171,44 +196,52 @@ class NewsContext:
             naver_items=[],
             global_headlines="",
             fear_greed=FearGreedData.unknown(),
+            global_items=[],
         )
 
 
 # ── 독립 비동기 함수 ──────────────────────────────────────────────────
 
-async def fetch_global_rss_news() -> str:
+async def fetch_global_rss_news() -> tuple[str, list[NewsItem]]:
     """
     CoinDesk + Decrypt RSS에서 각 5개 기사를 수집하여
-    포맷된 텍스트 블록으로 반환합니다.
+    (포맷된 텍스트 블록, NewsItem 목록) 튜플로 반환합니다.
 
-    인증/API 키 불필요. 실패 시 빈 문자열 반환.
+    텍스트 블록: AI 프롬프트용 (URL 없음, 토큰 절약)
+    NewsItem 목록: 알림용 (URL 포함)
+
+    인증/API 키 불필요. 실패 시 ("", []) 반환.
     """
-    lines: list[str] = []
+    all_items: list[NewsItem] = []
     async with httpx.AsyncClient(
         timeout=10,
         follow_redirects=True,
         headers=_RSS_HEADERS,
     ) as client:
         tasks = [
-            _fetch_rss_titles(client, name, url, _GLOBAL_RSS_PER_SOURCE)
+            _fetch_rss_items(client, name, url, _GLOBAL_RSS_PER_SOURCE)
             for name, url in _GLOBAL_RSS_FEEDS.items()
         ]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
 
     for batch in batches:
         if isinstance(batch, list):
-            lines.extend(batch)
+            all_items.extend(batch)
 
-    return "\n".join(lines)
+    # AI 프롬프트용 텍스트 (URL 없음)
+    headline_text = "\n".join(
+        f"- [{item.source.upper()}] {item.title}" for item in all_items
+    )
+    return headline_text, all_items
 
 
-async def _fetch_rss_titles(
+async def _fetch_rss_items(
     client: httpx.AsyncClient,
     source: str,
     url: str,
     limit: int,
-) -> list[str]:
-    """RSS 피드에서 기사 제목을 'limit'개 가져와 포맷된 문자열 목록으로 반환"""
+) -> list[NewsItem]:
+    """RSS 피드에서 기사를 'limit'개 가져와 NewsItem 목록으로 반환"""
     try:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -217,11 +250,22 @@ async def _fetch_rss_titles(
         logger.debug("rss.failed", source=source, error=str(exc))
         return []
 
-    result: list[str] = []
+    result: list[NewsItem] = []
     for entry in feed.entries[:limit]:
         title: str = entry.get("title", "").strip()
-        if title:
-            result.append(f"- [{source.upper()}] {title}")
+        link: str = entry.get("link", "").strip()
+        if not title:
+            continue
+        pub_dt = _parse_rss_date(entry)
+        item_id = hashlib.md5(link.encode()).hexdigest() if link else hashlib.md5(title.encode()).hexdigest()
+        result.append(NewsItem(
+            id=item_id,
+            title=title,
+            url=link,
+            source=source,
+            published_at=pub_dt,
+            sentiment=0,
+        ))
     return result
 
 
@@ -249,6 +293,47 @@ async def fetch_fear_and_greed_index() -> FearGreedData:
     except Exception as exc:
         logger.warning("fear_greed.failed", error=str(exc))
         return FearGreedData.unknown()
+
+
+async def fetch_btc_dominance() -> DominanceData:
+    """
+    CoinGecko /global 엔드포인트에서 BTC/ETH 도미넌스를 조회합니다.
+
+    인증/API 키 불필요. 실패 시 DominanceData.unknown() 반환.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                _COINGECKO_GLOBAL_URL,
+                headers={"User-Agent": "AutoCrypto/1.0"},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+
+        dom = data.get("market_cap_percentage", {})
+        btc_dom = round(float(dom.get("btc", 0.0)), 2)
+        eth_dom = round(float(dom.get("eth", 0.0)), 2)
+        total_mcap = float(data.get("total_market_cap", {}).get("usd", 0.0))
+        mcap_change = round(float(data.get("market_cap_change_percentage_24h_usd", 0.0)), 2)
+        updated_at = datetime.now(tz=timezone.utc).isoformat()
+
+        logger.info(
+            "dominance.fetched",
+            btc=btc_dom,
+            eth=eth_dom,
+            total_mcap_b=round(total_mcap / 1e9, 1),
+        )
+        return DominanceData(
+            btc_dominance=btc_dom,
+            eth_dominance=eth_dom,
+            total_market_cap_usd=total_mcap,
+            market_cap_change_24h=mcap_change,
+            updated_at=updated_at,
+        )
+
+    except Exception as exc:
+        logger.warning("dominance.failed", error=str(exc))
+        return DominanceData.unknown()
 
 
 # ── NewsFetcher 클래스 ────────────────────────────────────────────────
@@ -286,7 +371,7 @@ class NewsFetcher:
             coins = [_upbit_to_coin(s) for s in symbols]
 
         # 세 소스 병렬 수집
-        naver_result, global_headlines, fear_greed = await asyncio.gather(
+        naver_result, global_rss_result, fear_greed = await asyncio.gather(
             self._fetch_naver(coins, max_age_seconds),
             fetch_global_rss_news(),
             fetch_fear_and_greed_index(),
@@ -294,11 +379,14 @@ class NewsFetcher:
         )
 
         naver_items: list[NewsItem] = naver_result if isinstance(naver_result, list) else []
+        global_headlines, global_items = (
+            global_rss_result if isinstance(global_rss_result, tuple) else ("", [])
+        )
 
         logger.info(
             "news.fetched",
             naver=len(naver_items),
-            global_headlines=len(global_headlines.splitlines()),
+            global_items=len(global_items),
             fear_greed_score=fear_greed.score,
             symbols=coins,
         )
@@ -307,6 +395,7 @@ class NewsFetcher:
             naver_items=naver_items,
             global_headlines=global_headlines,
             fear_greed=fear_greed,
+            global_items=global_items,
         )
 
     # ── 소스: 네이버 뉴스 검색 API ───────────────────────────────────

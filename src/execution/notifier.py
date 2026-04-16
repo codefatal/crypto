@@ -14,6 +14,7 @@ import structlog
 
 from config import get_settings
 from src.ai.schemas import AIDecision, SignalType
+from src.data.news_fetcher import DominanceData
 
 logger = structlog.get_logger(__name__)
 
@@ -88,7 +89,94 @@ class Notifier:
             return_exceptions=True,
         )
 
+    async def send_signal_brief(self, decision: AIDecision) -> None:
+        """BTC 간단 알림 — HIGH가 아닌 신뢰도에서 현재가·신호·근거 중심으로 발송"""
+        await asyncio.gather(
+            self._discord_signal_brief(decision),
+            self._telegram_signal_brief(decision),
+            return_exceptions=True,
+        )
+
+    async def send_dominance(self, data: DominanceData) -> None:
+        """BTC 도미넌스 리포트를 Discord + Telegram으로 발송"""
+        await asyncio.gather(
+            self._discord_dominance(data),
+            self._telegram_dominance(data),
+            return_exceptions=True,
+        )
+
     # ── Discord ───────────────────────────────────────────────────────
+
+    async def _discord_signal_brief(self, decision: AIDecision) -> None:
+        webhook_url = self._settings.discord_signal_webhook_url or \
+                      self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        sig = decision.trade_signal
+        signal_type = SignalType(sig.signal) if isinstance(sig.signal, str) else sig.signal
+        color = _SIGNAL_COLOR.get(signal_type, 0x888888)
+        emoji = _SIGNAL_EMOJI.get(signal_type, "")
+        conf_val = sig.confidence if isinstance(sig.confidence, str) else sig.confidence.value
+        sig_val = sig.signal if isinstance(sig.signal, str) else sig.signal.value
+        conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
+
+        embed = {
+            "title": f"₿ {decision.symbol} — {sig_val} (BTC 알림)",
+            "color": color,
+            "timestamp": decision.timestamp,
+            "fields": [
+                {
+                    "name": f"{conf_emoji} 신뢰도",
+                    "value": f"{conf_val} ({sig.confidence_score:.1f}/100)",
+                    "inline": True,
+                },
+                {
+                    "name": "📌 현재가",
+                    "value": f"`{sig.entry_price:,.2f}`",
+                    "inline": True,
+                },
+                {
+                    "name": "📝 판단 근거",
+                    "value": sig.reasoning[:512],
+                    "inline": False,
+                },
+            ],
+            "footer": {"text": f"{emoji} {conf_val} | {decision.model_version}"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
+
+    async def _discord_dominance(self, data: DominanceData) -> None:
+        webhook_url = self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        change_emoji = "📈" if data.market_cap_change_24h >= 0 else "📉"
+        total_b = data.total_market_cap_usd / 1e9
+
+        embed = {
+            "title": "🌐 BTC 도미넌스 리포트",
+            "color": 0xF7931A,
+            "timestamp": data.updated_at or datetime.now(tz=timezone.utc).isoformat(),
+            "fields": [
+                {
+                    "name": "₿ BTC 도미넌스",
+                    "value": f"**{data.btc_dominance:.2f}%**",
+                    "inline": True,
+                },
+                {
+                    "name": "Ξ ETH 도미넌스",
+                    "value": f"**{data.eth_dominance:.2f}%**",
+                    "inline": True,
+                },
+                {
+                    "name": f"{change_emoji} 전체 시총",
+                    "value": f"${total_b:,.1f}B ({data.market_cap_change_24h:+.2f}% 24h)",
+                    "inline": False,
+                },
+            ],
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
 
     async def _discord_signal(self, decision: AIDecision) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
@@ -199,6 +287,40 @@ class Notifier:
             f"📝 *판단 근거*\n{sig.reasoning[:500]}\n\n"
             f"⚠️ *리스크*\n{risks}\n\n"
             f"_Model: {decision.model_version}_"
+        )
+        await self._telegram_plain(text)
+
+    async def _telegram_signal_brief(self, decision: AIDecision) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        sig = decision.trade_signal
+        sig_val = sig.signal if isinstance(sig.signal, str) else sig.signal.value
+        conf_val = sig.confidence if isinstance(sig.confidence, str) else sig.confidence.value
+        emoji = _SIGNAL_EMOJI.get(SignalType(sig_val), "")
+        conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
+
+        text = (
+            f"₿ *{decision.symbol} — {sig_val}* (BTC 알림)\n\n"
+            f"{conf_emoji} 신뢰도: `{conf_val}` ({sig.confidence_score:.1f}/100)\n"
+            f"📌 현재가: `{sig.entry_price:,.2f}`\n\n"
+            f"📝 *판단 근거*\n{sig.reasoning[:400]}\n\n"
+            f"_{emoji} {conf_val} | {decision.model_version}_"
+        )
+        await self._telegram_plain(text)
+
+    async def _telegram_dominance(self, data: DominanceData) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        change_emoji = "📈" if data.market_cap_change_24h >= 0 else "📉"
+        total_b = data.total_market_cap_usd / 1e9
+
+        text = (
+            f"🌐 *BTC 도미넌스 리포트*\n\n"
+            f"₿ BTC 도미넌스: `{data.btc_dominance:.2f}%`\n"
+            f"Ξ ETH 도미넌스: `{data.eth_dominance:.2f}%`\n"
+            f"{change_emoji} 전체 시총: `${total_b:,.1f}B` ({data.market_cap_change_24h:+.2f}% 24h)"
         )
         await self._telegram_plain(text)
 

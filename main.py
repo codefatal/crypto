@@ -27,7 +27,7 @@ from structlog.dev import ConsoleRenderer
 
 from config import get_settings
 from src.ai.analyzer import AIAnalyzer
-from src.data.news_fetcher import NewsContext, NewsFetcher
+from src.data.news_fetcher import NewsContext, NewsFetcher, fetch_btc_dominance
 from src.execution.logger import ReasoningLogger
 from src.execution.notifier import Notifier
 from src.indicator.bakkta import BakktaIndicator
@@ -142,8 +142,14 @@ def _format_news_digest(news_ctx: NewsContext) -> str:
         emoji = "😱" if fg.score < 25 else "😨" if fg.score < 45 else "😐" if fg.score < 55 else "😏" if fg.score < 75 else "🤑"
         lines.append(f"\n{emoji} **공포탐욕 지수**: {fg.score}/100 — {fg.label}")
 
-    # 글로벌 헤드라인
-    if news_ctx.global_headlines:
+    # 글로벌 헤드라인 (URL 포함)
+    if news_ctx.global_items:
+        items_text = "\n".join(
+            f"• [{item.title}]({item.url})" if item.url else f"• {item.title}"
+            for item in news_ctx.global_items[:8]
+        )
+        lines.append(f"\n🌍 **글로벌 헤드라인**\n{items_text}")
+    elif news_ctx.global_headlines:
         lines.append(f"\n🌍 **글로벌 헤드라인**\n{news_ctx.global_headlines[:800]}")
 
     # 네이버 뉴스 (상위 5개)
@@ -174,6 +180,7 @@ class AutoCrypto:
         # 뉴스 캐시 (scan_interval_sec마다 갱신)
         self._news_cache: NewsContext | None = None
         self._news_refresh_task: asyncio.Task | None = None
+        self._dominance_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         logger.info(
@@ -190,6 +197,7 @@ class AutoCrypto:
         await self._log_btc_snapshot()
 
         self._news_refresh_task = asyncio.create_task(self._news_refresh_loop())
+        self._dominance_task = asyncio.create_task(self._dominance_check_loop())
         self._running = True
 
         # 시작 알림
@@ -201,6 +209,9 @@ class AutoCrypto:
         }
         status.update(_exchange_display())
         await self._notifier.send_system_status(status)
+
+        # 최초 실행: BTC/ETH 지표 계산 + 알림 (스캐너 시작 전)
+        asyncio.create_task(self._analyze_initial_coins())
 
         try:
             await self._scanner.start()
@@ -251,6 +262,7 @@ class AutoCrypto:
             sig_val = (
                 sig.signal if isinstance(sig.signal, str) else sig.signal.value
             )
+            is_btc = _extract_coin(symbol) == "BTC"
 
             logger.info(
                 "pipeline.signal",
@@ -271,7 +283,9 @@ class AutoCrypto:
             # 4. DB 로깅
             decision_id = await asyncio.to_thread(self._db.log_decision, decision)
 
-            # 5. HIGH 신뢰도만 알림 + 거래 실행
+            # 5. 알림 + 거래 실행
+            # - HIGH 신뢰도: 모든 코인 알림 + 거래
+            # - MEDIUM/LOW:  BTC만 간단 알림 (거래 없음)
             if conf_val == "HIGH":
                 await self._notifier.send_signal(decision)
 
@@ -293,6 +307,8 @@ class AutoCrypto:
                         await asyncio.to_thread(
                             self._db.mark_decision_executed, decision_id
                         )
+            elif is_btc:
+                await self._notifier.send_signal_brief(decision)
 
         except Exception as exc:
             logger.error(
@@ -302,6 +318,82 @@ class AutoCrypto:
                 error=str(exc),
                 exc_info=True,
             )
+
+    async def _analyze_initial_coins(self) -> None:
+        """시작 시 BTC/ETH 지표 계산 + AI 분석 + 알림 (업비트 전용).
+        스캐너가 히스토리를 로드하기 전에 독립적으로 실행합니다."""
+        if self._exchange != "upbit":
+            return
+        import pyupbit
+        for symbol in ["KRW-BTC", "KRW-ETH"]:
+            try:
+                df = await asyncio.to_thread(
+                    pyupbit.get_ohlcv,
+                    symbol,
+                    interval=settings.timeframe,
+                    count=201,
+                )
+                if df is None or df.empty:
+                    logger.warning("initial_analysis.no_data", symbol=symbol)
+                    continue
+
+                from src.data.upbit_scanner import _normalize_ohlcv
+                df_norm = _normalize_ohlcv(df, symbol)
+                # 마지막 행(현재 형성 중) 제거
+                df_norm = df_norm.iloc[:-1].reset_index(drop=True)
+
+                result = self._indicator.compute(symbol, df_norm)
+                if result is None:
+                    continue
+
+                coin = _extract_coin(symbol)
+                news_ctx = (
+                    self._news_cache.for_coin(coin)
+                    if self._news_cache is not None
+                    else NewsContext.empty()
+                )
+                decision = await self._ai.analyze(symbol, result, news_ctx)
+                if decision is None or decision.is_fallback:
+                    continue
+
+                sig = decision.trade_signal
+                conf_val = (
+                    sig.confidence if isinstance(sig.confidence, str)
+                    else sig.confidence.value
+                )
+                if conf_val == "HIGH":
+                    await self._notifier.send_signal(decision)
+                else:
+                    await self._notifier.send_signal_brief(decision)
+
+                logger.info(
+                    "initial_analysis.done",
+                    symbol=symbol,
+                    confidence=conf_val,
+                    score=sig.confidence_score,
+                )
+            except Exception as exc:
+                logger.warning("initial_analysis.failed", symbol=symbol, error=str(exc))
+
+    async def _dominance_check_loop(self) -> None:
+        """최초 실행 즉시 + 매시간 정각(+5초 버퍼)에 BTC 도미넌스를 체크하고 알림 발송."""
+        first_run = True
+        while self._running:
+            if not first_run:
+                now = datetime.now(tz=timezone.utc)
+                elapsed = now.minute * 60 + now.second + now.microsecond / 1e6
+                wait_sec = max(3600.0 - elapsed, 0.0) + 5.0
+                logger.debug("dominance.next_check_in", seconds=round(wait_sec, 1))
+                await asyncio.sleep(wait_sec)
+            first_run = False
+
+            if not self._running:
+                break
+            try:
+                dom = await fetch_btc_dominance()
+                await self._notifier.send_dominance(dom)
+            except Exception as exc:
+                logger.warning("dominance.loop_error", error=str(exc))
 
     async def _news_refresh_loop(self) -> None:
         """뉴스 + 공포·탐욕 지수를 scan_interval_sec마다 갱신.
@@ -363,6 +455,8 @@ class AutoCrypto:
         self._running = False
         if self._news_refresh_task:
             self._news_refresh_task.cancel()
+        if self._dominance_task:
+            self._dominance_task.cancel()
         await self._scanner.stop()
         await self._trader.close()
         await self._notifier.send_system_status(

@@ -32,6 +32,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
+### Startup sequence
+
+```
+AutoCrypto.start()
+    ├─ trader.init()
+    ├─ _log_btc_snapshot()              — pyupbit BTC 데이터 파이프라인 확인
+    ├─ create_task(_news_refresh_loop)  — 뉴스 + 공포탐욕 갱신 (scan_interval_sec마다)
+    ├─ create_task(_dominance_check_loop) — BTC 도미넌스 (시작 즉시 + 매시간 정각)
+    ├─ send_system_status()
+    ├─ create_task(_analyze_initial_coins) — BTC/ETH 즉시 분석 + 알림 (upbit 전용)
+    └─ scanner.start()  (blocking)
+```
+
 ### Data Flow (one candle cycle)
 
 ```
@@ -41,10 +54,7 @@ WebSocket ticker (pyupbit mp.Process)
 UpbitScanner._ws_consumer_loop()   — live price / volume update
     │
     ▼  (at candle boundary)
-UpbitScanner._emit_all_candles()   — REST OHLCV fetch, Semaphore(8)
-    │  on_signal(symbol, df)
-    ▼
-UpbitScanner._emit_all_candles()   — top MAX_SYMBOLS_PER_CANDLE by volume (default 30)
+UpbitScanner._emit_all_candles()   — top MAX_SYMBOLS_PER_CANDLE by 24h volume (default 30)
     │  on_signal(symbol, df)
     ▼
 main.py._process_symbol()
@@ -53,7 +63,8 @@ main.py._process_symbol()
     ├─ news_cache.for_coin(coin)   — coin-filtered NewsContext
     ├─ AIAnalyzer.analyze()        — budget check → Groq API, Semaphore(4), 429 sleep
     │    └─ returns None if AI_DAILY_TOKEN_LIMIT exhausted (default 90,000)
-    └─ if HIGH confidence → notifier.send_signal() + trader.execute()
+    ├─ if HIGH confidence → notifier.send_signal() + trader.execute()
+    └─ if BTC + MEDIUM/LOW → notifier.send_signal_brief()  (알림만, 거래 없음)
 ```
 
 ### Exchange Toggle
@@ -68,9 +79,9 @@ main.py._process_symbol()
 | `src/indicator/bakkta.py` | Pure numpy/pandas, no I/O. `BakktaResult.is_tradeable(min_score)` gates all AI calls — threshold read from `settings.ai_min_score`. |
 | `src/ai/analyzer.py` | `AIAnalyzer` wraps Groq (OpenAI-compat). Three-layer JSON safety: regex extraction → jsonschema → Pydantic. Falls back to `neutral_fallback()` after `AI_MAX_RETRIES` exhausted. Returns `None` when daily token budget (`AI_DAILY_TOKEN_LIMIT`) is exhausted — daily counter resets at midnight UTC. |
 | `src/ai/schemas.py` | `TradeSignal` (Pydantic), `TRADE_SIGNAL_JSON_SCHEMA` (injected into system prompt), `neutral_fallback()`. |
-| `src/data/news_fetcher.py` | `NewsFetcher.fetch_recent()` returns `NewsContext` (naver + RSS + fear/greed). `NewsContext.for_coin(coin)` filters naver items per-symbol; global headlines and fear/greed are shared. |
+| `src/data/news_fetcher.py` | `NewsFetcher.fetch_recent()` returns `NewsContext` (naver + RSS + fear/greed). `NewsContext.global_items` holds `list[NewsItem]` with URLs for human-readable notifications; `global_headlines` is URL-free text for AI prompts. `fetch_btc_dominance()` calls CoinGecko `/global` (no auth). `DominanceData` dataclass holds BTC/ETH dominance %. |
 | `src/execution/logger.py` | `ReasoningLogger` — SQLAlchemy sync ORM, called via `asyncio.to_thread`. Uses `NullPool` for SQLite (prevents FlushError from concurrent threads). |
-| `src/execution/notifier.py` | Discord webhook embed + Telegram Bot API. All public methods use `asyncio.gather(..., return_exceptions=True)` — one failed channel never blocks the other. |
+| `src/execution/notifier.py` | Discord webhook embed + Telegram Bot API. `send_signal()` = full embed (HIGH only). `send_signal_brief()` = compact embed (BTC non-HIGH). `send_dominance()` = BTC dominance report. All public methods use `asyncio.gather(..., return_exceptions=True)`. |
 | `src/execution/trader.py` | `UpbitTrader` + `OrderResult` dataclass (shared by BinanceTrader). |
 
 ### Key Constraints
