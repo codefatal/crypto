@@ -8,7 +8,7 @@
       "label": "start-bot-for-debug",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "args": ["${workspaceFolder}/main.py"],
+      "args": ["-Xfrozen_modules=off", "${workspaceFolder}/main.py"],
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
