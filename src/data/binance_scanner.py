@@ -111,7 +111,13 @@ class BinanceScanner:
             and s["status"] == "TRADING"
             and volume_map.get(s["symbol"], 0) >= self._settings.min_volume_usdt
         ]
-        return sorted(symbols)
+
+        # 거래량 내림차순 정렬 후 상위 N개만 유지 (일일 토큰 예산 절약)
+        max_syms = self._settings.max_symbols_per_candle
+        symbols_sorted = sorted(symbols, key=lambda s: volume_map.get(s, 0), reverse=True)
+        if max_syms > 0:
+            symbols_sorted = symbols_sorted[:max_syms]
+        return symbols_sorted
 
     async def _preload_history(self) -> None:
         """심볼별 초기 OHLCV 히스토리 병렬 로드"""

@@ -291,6 +291,15 @@ class UpbitScanner:
             if self._volume_krw.get(s, min_vol) >= min_vol  # 아직 미수신 심볼은 포함
         ]
 
+        # 거래대금 내림차순으로 정렬 후 상위 N개만 분석 (일일 토큰 예산 절약)
+        max_syms = self._settings.max_symbols_per_candle
+        if max_syms > 0:
+            active = sorted(
+                active,
+                key=lambda s: self._volume_krw.get(s, 0),
+                reverse=True,
+            )[:max_syms]
+
         semaphore = asyncio.Semaphore(8)
 
         async def _fetch_and_emit(symbol: str) -> None:

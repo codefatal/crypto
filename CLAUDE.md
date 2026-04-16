@@ -44,11 +44,15 @@ UpbitScanner._ws_consumer_loop()   — live price / volume update
 UpbitScanner._emit_all_candles()   — REST OHLCV fetch, Semaphore(8)
     │  on_signal(symbol, df)
     ▼
+UpbitScanner._emit_all_candles()   — top MAX_SYMBOLS_PER_CANDLE by volume (default 30)
+    │  on_signal(symbol, df)
+    ▼
 main.py._process_symbol()
-    ├─ BakktaIndicator.compute()   — score 0-100; skip if score < 55
+    ├─ BakktaIndicator.compute()   — score 0-100; skip if score < AI_MIN_SCORE (default 70)
     ├─ asyncio.to_thread(db.log_indicator)
     ├─ news_cache.for_coin(coin)   — coin-filtered NewsContext
-    ├─ AIAnalyzer.analyze()        — Groq API, Semaphore(4), 429 sleep
+    ├─ AIAnalyzer.analyze()        — budget check → Groq API, Semaphore(4), 429 sleep
+    │    └─ returns None if AI_DAILY_TOKEN_LIMIT exhausted (default 90,000)
     └─ if HIGH confidence → notifier.send_signal() + trader.execute()
 ```
 
@@ -61,8 +65,8 @@ main.py._process_symbol()
 | Module | Role |
 |---|---|
 | `config/settings.py` | Single `Settings` (pydantic-settings). Always import via `get_settings()` — never read `os.environ` directly. `lru_cache(1)` means settings are frozen at startup. |
-| `src/indicator/bakkta.py` | Pure numpy/pandas, no I/O. `BakktaResult.is_tradeable(min_score=55)` gates all AI calls. |
-| `src/ai/analyzer.py` | `AIAnalyzer` wraps Groq (OpenAI-compat). Three-layer JSON safety: regex extraction → jsonschema → Pydantic. Falls back to `neutral_fallback()` after `AI_MAX_RETRIES` exhausted. |
+| `src/indicator/bakkta.py` | Pure numpy/pandas, no I/O. `BakktaResult.is_tradeable(min_score)` gates all AI calls — threshold read from `settings.ai_min_score`. |
+| `src/ai/analyzer.py` | `AIAnalyzer` wraps Groq (OpenAI-compat). Three-layer JSON safety: regex extraction → jsonschema → Pydantic. Falls back to `neutral_fallback()` after `AI_MAX_RETRIES` exhausted. Returns `None` when daily token budget (`AI_DAILY_TOKEN_LIMIT`) is exhausted — daily counter resets at midnight UTC. |
 | `src/ai/schemas.py` | `TradeSignal` (Pydantic), `TRADE_SIGNAL_JSON_SCHEMA` (injected into system prompt), `neutral_fallback()`. |
 | `src/data/news_fetcher.py` | `NewsFetcher.fetch_recent()` returns `NewsContext` (naver + RSS + fear/greed). `NewsContext.for_coin(coin)` filters naver items per-symbol; global headlines and fear/greed are shared. |
 | `src/execution/logger.py` | `ReasoningLogger` — SQLAlchemy sync ORM, called via `asyncio.to_thread`. Uses `NullPool` for SQLite (prevents FlushError from concurrent threads). |
@@ -73,7 +77,8 @@ main.py._process_symbol()
 
 - **`websockets==12.0` is pinned** — pyupbit 0.2.33 requires the legacy `websockets.legacy` API removed in v13.
 - **pyupbit WebSocketManager** is an `mp.Process` (not a thread). Its internal queue is name-mangled `_WebSocketManager__q`; accessed directly in `_ws_consumer_loop` with `asyncio.to_thread(_mp_q.get, True, 2.0)`.
-- **Groq free tier**: 12,000 TPM. `AIAnalyzer._semaphore = Semaphore(4)` limits concurrent calls. On 429, the retry-after seconds are parsed from the error message and slept.
+- **Groq rate limits**: Two distinct limits — TPM(분당) and TPD(일일). `Semaphore(4)` limits concurrent calls for TPM. On 429, `_parse_retry_after()` parses both `"6.9s"` and `"49m7.1s"` formats from the error message. Daily token usage is tracked in `AIAnalyzer._daily_token_used`; when within 4,000 tokens of `AI_DAILY_TOKEN_LIMIT` (default 90,000), `analyze()` returns `None` and logs `ai.daily_budget_exhausted`. Counter resets at midnight UTC.
+- **AI call volume control**: `MAX_SYMBOLS_PER_CANDLE` (default 30) limits symbols per candle boundary to top-N by 24h volume. `AI_MIN_SCORE` (default 70.0) raises the Bakkta score threshold — both reduce daily token consumption.
 - **SQLite + asyncio**: NullPool gives each `to_thread` call its own connection. Do not switch back to StaticPool.
 - **pydantic-settings `.env` parsing**: inline comments on value lines break float/int parsing. Keep comments on separate lines.
 

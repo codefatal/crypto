@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     ai_max_tokens: int = Field(2048, alias="AI_MAX_TOKENS")
     ai_temperature: float = Field(0.1, alias="AI_TEMPERATURE")
     ai_max_retries: int = Field(2, alias="AI_MAX_RETRIES")
+    # 일일 토큰 한도 (Groq on_demand 티어 100k TPD 기준, 10% 여유 확보)
+    ai_daily_token_limit: int = Field(90_000, alias="AI_DAILY_TOKEN_LIMIT")
+    # BakktaIndicator 최소 통과 점수 — 이 값 이상일 때만 AI 호출
+    ai_min_score: float = Field(70.0, alias="AI_MIN_SCORE")
 
     # ── Database ─────────────────────────────────────────────
     # 로컬: sqlite:///autocrypto.db
@@ -89,6 +93,8 @@ class Settings(BaseSettings):
     scan_interval_sec: int = Field(60, alias="SCAN_INTERVAL_SEC")
     # Upbit: "minute15" / Binance: "15m" — 각 스캐너가 내부 변환 처리
     timeframe: str = Field("minute15", alias="TIMEFRAME")
+    # 캔들 경계마다 AI 분석 대상 심볼 수 상한 (거래대금 내림차순 상위 N개)
+    max_symbols_per_candle: int = Field(30, alias="MAX_SYMBOLS_PER_CANDLE")
 
     # ── Logging ──────────────────────────────────────────────
     log_level: str = Field("INFO", alias="LOG_LEVEL")

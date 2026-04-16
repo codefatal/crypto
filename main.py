@@ -221,7 +221,7 @@ class AutoCrypto:
                 return
 
             # 약한 신호는 AI 호출 없이 조기 종료 (API 비용 절감)
-            if not result.is_tradeable(min_score=55.0):
+            if not result.is_tradeable(min_score=settings.ai_min_score):
                 return
 
             # 2. 지표 스냅샷 DB 저장 (백그라운드)

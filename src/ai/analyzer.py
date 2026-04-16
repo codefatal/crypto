@@ -27,7 +27,7 @@ import asyncio
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -80,6 +80,32 @@ def _build_system_prompt() -> str:
     """JSON 스키마를 시스템 프롬프트에 삽입하여 반환"""
     schema_str = json.dumps(TRADE_SIGNAL_JSON_SCHEMA, ensure_ascii=False, indent=2)
     return _SYSTEM_PROMPT_TEMPLATE.format(schema=schema_str)
+
+
+def _next_midnight_utc() -> datetime:
+    """다음 자정(UTC) datetime 반환 — 일일 토큰 카운터 리셋 기준"""
+    now = datetime.now(tz=timezone.utc)
+    return (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def _parse_retry_after(exc_str: str) -> float:
+    """
+    Groq 429 에러 메시지에서 재시도 대기 시간을 파싱합니다.
+
+    지원 형식:
+      - "Please try again in 49m7.104s."   → 2948.1s
+      - "Please try again in 6.915s."      → 7.9s
+    미매칭 시 기본값 60.0 반환.
+    """
+    # 분+초 형식: "49m7.104s" 또는 초만 있는 형식: "6.915s"
+    m = re.search(r"try again in (?:(\d+)m)?(\d+\.?\d*)s", exc_str)
+    if m:
+        minutes = float(m.group(1) or 0)
+        seconds = float(m.group(2))
+        return minutes * 60 + seconds + 1.0
+    return 60.0
 
 
 # ── JSON 추출 유틸리티 ────────────────────────────────────────────────
@@ -140,20 +166,67 @@ class AIAnalyzer:
             base_url=self._settings.groq_base_url,
         )
         self._system_prompt = _build_system_prompt()
-        # Groq 무료 티어: 12,000 TPM. 콜당 ~1,800 토큰 → 동시 4개로 제한
-        # 캔들 경계에 수십 개 심볼이 동시 실행돼도 TPM 한도를 넘지 않도록 조절
+        # Groq TPM 한도: 동시 4개 호출로 제한
         self._semaphore = asyncio.Semaphore(4)
+        # ── 일일 토큰 예산 추적 ───────────────────────────────
+        self._daily_token_used: int = 0
+        self._daily_reset_at: datetime = _next_midnight_utc()
+        self._budget_exhausted: bool = False
+
+    # ── 일일 예산 관리 ─────────────────────────────────────────────────
+
+    def _refresh_daily_budget(self) -> None:
+        """자정(UTC)이 지났으면 일일 토큰 카운터를 리셋합니다."""
+        now = datetime.now(tz=timezone.utc)
+        if now >= self._daily_reset_at:
+            prev_used = self._daily_token_used
+            self._daily_token_used = 0
+            self._daily_reset_at = _next_midnight_utc()
+            self._budget_exhausted = False
+            logger.info(
+                "ai.daily_budget_reset",
+                prev_used=prev_used,
+                next_reset=self._daily_reset_at.isoformat(),
+            )
+
+    def _is_budget_available(self) -> bool:
+        """
+        일일 토큰 예산이 남아있으면 True.
+        콜당 평균 4,000 토큰 여유가 있어야 True를 반환합니다.
+        """
+        self._refresh_daily_budget()
+        limit = self._settings.ai_daily_token_limit
+        return self._daily_token_used + 4_000 <= limit
+
+    # ── 분석 진입점 ────────────────────────────────────────────────────
 
     async def analyze(
         self,
         symbol: str,
         indicator: BakktaResult,
         news: NewsContext,
-    ) -> AIDecision:
+    ) -> "AIDecision | None":
         """
-        분석을 수행하고 항상 AIDecision을 반환합니다.
-        AI 실패 시에도 NEUTRAL 폴백으로 안전하게 반환하며 예외를 전파하지 않습니다.
+        분석을 수행하고 AIDecision 또는 None을 반환합니다.
+
+        None 반환 조건:
+          - 일일 토큰 예산 소진 (AI_DAILY_TOKEN_LIMIT 도달)
+
+        AI JSON 파싱 실패 시에도 NEUTRAL 폴백 AIDecision을 반환하며
+        예외를 상위로 전파하지 않습니다.
         """
+        # ── 일일 예산 체크 ─────────────────────────────────────
+        if not self._is_budget_available():
+            if not self._budget_exhausted:
+                self._budget_exhausted = True
+                logger.error(
+                    "ai.daily_budget_exhausted",
+                    used=self._daily_token_used,
+                    limit=self._settings.ai_daily_token_limit,
+                    reset_at=self._daily_reset_at.isoformat(),
+                )
+            return None
+
         start_ms = int(time.time() * 1000)
         initial_prompt = self._build_user_prompt(indicator, news)
 
@@ -214,16 +287,21 @@ class AIAnalyzer:
 
             # ── Groq API 호출 ─────────────────────────────────────
             try:
-                raw_text = await self._call_groq(messages)
+                raw_text, tokens_used = await self._call_groq(messages)
+                self._daily_token_used += tokens_used
+                logger.debug(
+                    "ai.token_usage",
+                    symbol=symbol,
+                    tokens=tokens_used,
+                    daily_total=self._daily_token_used,
+                    daily_limit=self._settings.ai_daily_token_limit,
+                )
             except Exception as exc:
                 last_error = f"API 호출 실패: {exc}"
                 logger.error("ai.api_error", symbol=symbol, attempt=attempt, error=last_error)
-                # 429 Rate Limit: 에러 메시지에서 재시도 대기 시간을 파싱해 sleep
-                # Groq 오류 형식: "Please try again in 6.915s."
                 exc_str = str(exc)
                 if "429" in exc_str or "rate_limit_exceeded" in exc_str:
-                    m = re.search(r"try again in (\d+\.?\d*)s", exc_str)
-                    wait_sec = float(m.group(1)) + 1.0 if m else 10.0
+                    wait_sec = _parse_retry_after(exc_str)
                     logger.info("ai.rate_limited", symbol=symbol, wait_sec=round(wait_sec, 1))
                     await asyncio.sleep(wait_sec)
                 if attempt < max_retries:
@@ -317,11 +395,14 @@ class AIAnalyzer:
 
     # ── Groq API 호출 ─────────────────────────────────────────────────
 
-    async def _call_groq(self, messages: list[dict[str, str]]) -> str:
+    async def _call_groq(self, messages: list[dict[str, str]]) -> tuple[str, int]:
         """
-        Groq API (OpenAI 호환 엔드포인트)를 통해 텍스트를 반환합니다.
+        Groq API (OpenAI 호환 엔드포인트)를 통해 텍스트와 사용 토큰 수를 반환합니다.
         temperature=0.1로 설정하여 JSON 출력 형식 일관성 극대화.
-        Semaphore(4)로 동시 호출을 제한하여 TPM(분당 토큰) 한도 초과를 방지합니다.
+        Semaphore(4)로 동시 호출을 제한하여 TPM 한도 초과를 방지합니다.
+
+        Returns:
+            (response_text, total_tokens_used)
         """
         async with self._semaphore:
             response = await self._client.chat.completions.create(
@@ -336,7 +417,8 @@ class AIAnalyzer:
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("Groq API가 빈 응답을 반환했습니다")
-        return content
+        total_tokens = response.usage.total_tokens if response.usage else 0
+        return content, total_tokens
 
     # ── 프롬프트 빌더 ─────────────────────────────────────────────────
 
