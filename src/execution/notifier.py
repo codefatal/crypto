@@ -16,6 +16,10 @@ import structlog
 # 동시 발송을 직렬화하여 burst 429를 방지한다.
 _DISCORD_SEMAPHORE = asyncio.Semaphore(1)
 
+# Telegram Bot API: 동일 채팅에 초당 1건, 분당 20건 제한.
+# 동시 발송을 직렬화하여 burst 429를 방지한다.
+_TELEGRAM_SEMAPHORE = asyncio.Semaphore(1)
+
 # 업비트 KRW 마켓 심볼 → 한국어 코인명 매핑
 _COIN_NAMES: dict[str, str] = {
     "KRW-BTC":   "비트코인",
@@ -679,6 +683,10 @@ class Notifier:
         await self._telegram_plain(text)
 
     async def _telegram_plain(self, text: str) -> None:
+        """Telegram sendMessage.
+        - 전역 Semaphore(1)로 직렬화 → burst 429 방지
+        - 429 수신 시 parameters.retry_after 읽어 최대 2회 재시도
+        """
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
 
@@ -689,10 +697,33 @@ class Notifier:
             "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                logger.debug("telegram.sent")
-        except Exception as exc:
-            logger.warning("telegram.send_failed", error=str(exc))
+        async with _TELEGRAM_SEMAPHORE:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    for attempt in range(3):
+                        resp = await client.post(url, json=payload)
+                        if resp.status_code == 429:
+                            retry_after: float = 1.0
+                            try:
+                                # Telegram: {"parameters": {"retry_after": N}}
+                                retry_after = float(
+                                    resp.json()
+                                    .get("parameters", {})
+                                    .get("retry_after", 1.0)
+                                )
+                            except Exception:
+                                retry_after = float(
+                                    resp.headers.get("Retry-After", "1")
+                                )
+                            logger.warning(
+                                "telegram.rate_limited",
+                                retry_after=retry_after,
+                                attempt=attempt,
+                            )
+                            await asyncio.sleep(retry_after + 0.1)
+                            continue
+                        resp.raise_for_status()
+                        logger.debug("telegram.sent")
+                        return
+            except Exception as exc:
+                logger.warning("telegram.send_failed", error=str(exc))
