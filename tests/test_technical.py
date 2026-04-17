@@ -227,8 +227,8 @@ class TestNotifierBreakoutAlert:
              patch.object(notifier, "_telegram_breakout", new_callable=AsyncMock) as t_mock:
             await notifier.send_breakout_alert("KRW-BTC", conditions, values)
 
-        d_mock.assert_called_once_with("KRW-BTC", conditions, values)
-        t_mock.assert_called_once_with("KRW-BTC", conditions, values)
+        d_mock.assert_called_once_with("KRW-BTC", conditions, values, None)
+        t_mock.assert_called_once_with("KRW-BTC", conditions, values, None)
 
     @pytest.mark.asyncio
     async def test_discord_embed_contains_symbol_and_conditions(self):

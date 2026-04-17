@@ -79,6 +79,15 @@ def _symbol_display(symbol: str) -> str:
     name = _COIN_NAMES.get(symbol)
     return f"{symbol}({name})" if name else symbol
 
+
+def _fmt_change(rate: float | None) -> str | None:
+    """24h 등락률 포맷. None이면 None 반환(필드 생략용).
+    rate는 소수(0.0512 = +5.12%). 반환 예: '▲ +5.12%' / '▼ -3.40%'"""
+    if rate is None:
+        return None
+    arrow = "\u25b2" if rate >= 0 else "\u25bc"  # ▲ / ▼
+    return f"{arrow} {rate:+.2%}"
+
 from config import get_settings
 from src.ai.schemas import AIDecision, SignalType
 from src.data.news_fetcher import DominanceData, MarketOverviewItem
@@ -121,11 +130,13 @@ class Notifier:
 
     # ── Public ────────────────────────────────────────────────────────
 
-    async def send_signal(self, decision: AIDecision) -> None:
+    async def send_signal(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         """매매 신호를 Discord + Telegram으로 동시 발송"""
         await asyncio.gather(
-            self._discord_signal(decision),
-            self._telegram_signal(decision),
+            self._discord_signal(decision, change_rate),
+            self._telegram_signal(decision, change_rate),
             return_exceptions=True,
         )
 
@@ -156,11 +167,13 @@ class Notifier:
             return_exceptions=True,
         )
 
-    async def send_signal_brief(self, decision: AIDecision) -> None:
+    async def send_signal_brief(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         """BTC 간단 알림 — HIGH가 아닌 신뢰도에서 현재가·신호·근거 중심으로 발송"""
         await asyncio.gather(
-            self._discord_signal_brief(decision),
-            self._telegram_signal_brief(decision),
+            self._discord_signal_brief(decision, change_rate),
+            self._telegram_signal_brief(decision, change_rate),
             return_exceptions=True,
         )
 
@@ -189,11 +202,12 @@ class Notifier:
         symbol: str,
         triggered_conditions: list[dict],
         current_values: dict[str, float],
+        change_rate: float | None = None,
     ) -> None:
         """규칙 기반 돌파 알림을 Discord + Telegram으로 발송"""
         await asyncio.gather(
-            self._discord_breakout(symbol, triggered_conditions, current_values),
-            self._telegram_breakout(symbol, triggered_conditions, current_values),
+            self._discord_breakout(symbol, triggered_conditions, current_values, change_rate),
+            self._telegram_breakout(symbol, triggered_conditions, current_values, change_rate),
             return_exceptions=True,
         )
 
@@ -203,11 +217,12 @@ class Notifier:
         change_pct: float,
         current_price: float,
         ref_price: float,
+        change_rate_24h: float | None = None,
     ) -> None:
         """급등/급락(±10% 이상) 알림을 Discord + Telegram으로 발송"""
         await asyncio.gather(
-            self._discord_spike(symbol, change_pct, current_price, ref_price),
-            self._telegram_spike(symbol, change_pct, current_price, ref_price),
+            self._discord_spike(symbol, change_pct, current_price, ref_price, change_rate_24h),
+            self._telegram_spike(symbol, change_pct, current_price, ref_price, change_rate_24h),
             return_exceptions=True,
         )
 
@@ -218,6 +233,7 @@ class Notifier:
         symbol: str,
         triggered_conditions: list[dict],
         current_values: dict[str, float],
+        change_rate: float | None = None,
     ) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
                       self._settings.discord_webhook_url
@@ -238,27 +254,39 @@ class Notifier:
             f"ADX `{_fmt(current_values.get('adx', float('nan')))}`"
         )
 
+        fields = []
+        chg = _fmt_change(change_rate)
+        if chg:
+            fields.append({
+                "name": "📊 24h 등락",
+                "value": f"`{chg}`",
+                "inline": True,
+            })
+        fields += [
+            {
+                "name": f"✅ 충족된 조건 ({count}/5)",
+                "value": cond_lines or "없음",
+                "inline": False,
+            },
+            {
+                "name": "📈 전체 지표 현황",
+                "value": summary,
+                "inline": False,
+            },
+        ]
+
         embed = {
             "title": f"🚀 [돌파 감지] {_symbol_display(symbol)} 기술적 조건 충족!",
             "color": 0x00BFFF,  # 하늘색 — AI 신호(초록/빨강)와 구별
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            "fields": [
-                {
-                    "name": f"✅ 충족된 조건 ({count}/5)",
-                    "value": cond_lines or "없음",
-                    "inline": False,
-                },
-                {
-                    "name": "📊 전체 지표 현황",
-                    "value": summary,
-                    "inline": False,
-                },
-            ],
+            "fields": fields,
             "footer": {"text": "Rule-based Breakout Alert"},
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
 
-    async def _discord_signal_brief(self, decision: AIDecision) -> None:
+    async def _discord_signal_brief(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
                       self._settings.discord_webhook_url
         if not webhook_url:
@@ -272,27 +300,36 @@ class Notifier:
         sig_val = sig.signal if isinstance(sig.signal, str) else sig.signal.value
         conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
 
+        fields = [
+            {
+                "name": f"{conf_emoji} 신뢰도",
+                "value": f"{conf_val} ({sig.confidence_score:.1f}/100)",
+                "inline": True,
+            },
+            {
+                "name": "📌 현재가",
+                "value": f"`{sig.entry_price:,.2f}`",
+                "inline": True,
+            },
+        ]
+        chg = _fmt_change(change_rate)
+        if chg:
+            fields.append({
+                "name": "📊 24h 등락",
+                "value": f"`{chg}`",
+                "inline": True,
+            })
+        fields.append({
+            "name": "📝 판단 근거",
+            "value": sig.reasoning[:512],
+            "inline": False,
+        })
+
         embed = {
             "title": f"₿ {_symbol_display(decision.symbol)} — {sig_val} (BTC 알림)",
             "color": color,
             "timestamp": decision.timestamp,
-            "fields": [
-                {
-                    "name": f"{conf_emoji} 신뢰도",
-                    "value": f"{conf_val} ({sig.confidence_score:.1f}/100)",
-                    "inline": True,
-                },
-                {
-                    "name": "📌 현재가",
-                    "value": f"`{sig.entry_price:,.2f}`",
-                    "inline": True,
-                },
-                {
-                    "name": "📝 판단 근거",
-                    "value": sig.reasoning[:512],
-                    "inline": False,
-                },
-            ],
+            "fields": fields,
             "footer": {"text": f"{emoji} {conf_val} | {decision.model_version}"},
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
@@ -380,7 +417,9 @@ class Notifier:
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
 
-    async def _discord_signal(self, decision: AIDecision) -> None:
+    async def _discord_signal(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
                       self._settings.discord_webhook_url
         if not webhook_url:
@@ -400,57 +439,66 @@ class Notifier:
 
         risks = "\n".join(f"• {r}" for r in sig.key_risks) if sig.key_risks else "없음"
 
+        fields = [
+            {
+                "name": f"{conf_emoji} 신뢰도",
+                "value": f"{conf_val} ({sig.confidence_score:.1f}/100)",
+                "inline": True,
+            },
+            {
+                "name": "📌 현재가",
+                "value": f"`{sig.entry_price:,.6f}`",
+                "inline": True,
+            },
+        ]
+        chg = _fmt_change(change_rate)
+        if chg:
+            fields.append({
+                "name": "📊 24h 등락",
+                "value": f"`{chg}`",
+                "inline": True,
+            })
+        fields += [
+            {
+                "name": "🔴 손절",
+                "value": f"`{sig.stop_loss:,.6f}`",
+                "inline": True,
+            },
+            {
+                "name": "🟢 익절",
+                "value": f"`{sig.take_profit:,.6f}`",
+                "inline": True,
+            },
+            {
+                "name": "📰 뉴스 영향",
+                "value": sig.news_impact,
+                "inline": True,
+            },
+            {
+                "name": "⏱️ 분석 소요",
+                "value": f"{decision.analysis_duration_ms}ms",
+                "inline": True,
+            },
+            {
+                "name": "📝 판단 근거",
+                "value": sig.reasoning[:1024],
+                "inline": False,
+            },
+            {
+                "name": "⚠️ 주요 리스크",
+                "value": risks[:512],
+                "inline": False,
+            },
+        ]
+
         embed = {
             "title": f"{emoji} {_symbol_display(decision.symbol)} — {sig_val}",
             "color": color,
             "timestamp": decision.timestamp,
-            "fields": [
-                {
-                    "name": f"{conf_emoji} 신뢰도",
-                    "value": f"{conf_val} ({sig.confidence_score:.1f}/100)",
-                    "inline": True,
-                },
-                {
-                    "name": "📌 현재가",
-                    "value": f"`{sig.entry_price:,.6f}`",
-                    "inline": True,
-                },
-                {
-                    "name": "🔴 손절",
-                    "value": f"`{sig.stop_loss:,.6f}`",
-                    "inline": True,
-                },
-                {
-                    "name": "🟢 익절",
-                    "value": f"`{sig.take_profit:,.6f}`",
-                    "inline": True,
-                },
-                {
-                    "name": "📰 뉴스 영향",
-                    "value": sig.news_impact,
-                    "inline": True,
-                },
-                {
-                    "name": "⏱️ 분석 소요",
-                    "value": f"{decision.analysis_duration_ms}ms",
-                    "inline": True,
-                },
-                {
-                    "name": "📝 판단 근거",
-                    "value": sig.reasoning[:1024],
-                    "inline": False,
-                },
-                {
-                    "name": "⚠️ 주요 리스크",
-                    "value": risks[:512],
-                    "inline": False,
-                },
-            ],
+            "fields": fields,
             "footer": {"text": f"Model: {decision.model_version}"},
         }
-
-        payload = {"embeds": [embed]}
-        await self._discord_post(webhook_url, payload)
+        await self._discord_post(webhook_url, {"embeds": [embed]})
 
     async def _discord_spike(
         self,
@@ -458,6 +506,7 @@ class Notifier:
         change_pct: float,
         current_price: float,
         ref_price: float,
+        change_rate_24h: float | None = None,
     ) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
                       self._settings.discord_webhook_url
@@ -469,27 +518,36 @@ class Notifier:
         label = "급등" if is_surge else "급락"
         color = 0xFF8C00 if is_surge else 0x9400D3  # 주황 / 보라
 
+        fields = [
+            {
+                "name": "📌 현재가",
+                "value": f"`{current_price:,.2f}` KRW",
+                "inline": True,
+            },
+            {
+                "name": "📊 기준가 (마지막 확정 캔들)",
+                "value": f"`{ref_price:,.2f}` KRW",
+                "inline": True,
+            },
+            {
+                "name": "📈 캔들 대비 변동",
+                "value": f"**{change_pct:+.2%}**",
+                "inline": True,
+            },
+        ]
+        chg = _fmt_change(change_rate_24h)
+        if chg:
+            fields.append({
+                "name": "📊 24h 등락",
+                "value": f"`{chg}`",
+                "inline": True,
+            })
+
         embed = {
             "title": f"{emoji} [{label}] {_symbol_display(symbol)} {change_pct:+.1%} 이상 변동!",
             "color": color,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            "fields": [
-                {
-                    "name": "📌 현재가",
-                    "value": f"`{current_price:,.2f}` KRW",
-                    "inline": True,
-                },
-                {
-                    "name": "📊 기준가 (마지막 확정 캔들)",
-                    "value": f"`{ref_price:,.2f}` KRW",
-                    "inline": True,
-                },
-                {
-                    "name": "📈 변동률",
-                    "value": f"**{change_pct:+.2%}**",
-                    "inline": True,
-                },
-            ],
+            "fields": fields,
             "footer": {"text": "Spike Alert (15분봉 기준)"},
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
@@ -536,7 +594,9 @@ class Notifier:
 
     # ── Telegram ──────────────────────────────────────────────────────
 
-    async def _telegram_signal(self, decision: AIDecision) -> None:
+    async def _telegram_signal(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
 
@@ -546,11 +606,14 @@ class Notifier:
         emoji = _SIGNAL_EMOJI.get(SignalType(sig_val), "")
 
         risks = "\n".join(f"  • {r}" for r in sig.key_risks) if sig.key_risks else "  없음"
+        chg = _fmt_change(change_rate)
+        chg_line = f"24h 등락: `{chg}`\n" if chg else ""
 
         text = (
             f"{emoji} *{_symbol_display(decision.symbol)} — {sig_val}*\n\n"
             f"신뢰도: `{conf_val}` ({sig.confidence_score:.1f}/100)\n"
             f"현재가: `{sig.entry_price:,.6f}`\n"
+            f"{chg_line}"
             f"손절: `{sig.stop_loss:,.6f}`\n"
             f"익절: `{sig.take_profit:,.6f}`\n"
             f"뉴스 영향: `{sig.news_impact}`\n\n"
@@ -565,6 +628,7 @@ class Notifier:
         symbol: str,
         triggered_conditions: list[dict],
         current_values: dict[str, float],
+        change_rate: float | None = None,
     ) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
@@ -574,9 +638,12 @@ class Notifier:
 
         cond_lines = "\n".join(f"  • {c['name']}" for c in triggered_conditions)
         count = len(triggered_conditions)
+        chg = _fmt_change(change_rate)
+        chg_line = f"24h 등락: `{chg}`\n" if chg else ""
 
         text = (
             f"🚀 *[돌파 감지] {_symbol_display(symbol)} 기술적 조건 충족!*\n\n"
+            f"{chg_line}"
             f"✅ *충족된 조건 ({count}/5)*\n{cond_lines}\n\n"
             f"📊 *전체 지표 현황*\n"
             f"RSI: `{_fmt(current_values.get('rsi', float('nan')))}` | "
@@ -587,7 +654,9 @@ class Notifier:
         )
         await self._telegram_plain(text)
 
-    async def _telegram_signal_brief(self, decision: AIDecision) -> None:
+    async def _telegram_signal_brief(
+        self, decision: AIDecision, change_rate: float | None = None
+    ) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
 
@@ -596,11 +665,14 @@ class Notifier:
         conf_val = sig.confidence if isinstance(sig.confidence, str) else sig.confidence.value
         emoji = _SIGNAL_EMOJI.get(SignalType(sig_val), "")
         conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
+        chg = _fmt_change(change_rate)
+        chg_line = f"📊 24h 등락: `{chg}`\n" if chg else ""
 
         text = (
             f"₿ *{_symbol_display(decision.symbol)} — {sig_val}* (BTC 알림)\n\n"
             f"{conf_emoji} 신뢰도: `{conf_val}` ({sig.confidence_score:.1f}/100)\n"
-            f"📌 현재가: `{sig.entry_price:,.2f}`\n\n"
+            f"📌 현재가: `{sig.entry_price:,.2f}`\n"
+            f"{chg_line}\n"
             f"📝 *판단 근거*\n{sig.reasoning[:400]}\n\n"
             f"_{emoji} {conf_val} | {decision.model_version}_"
         )
@@ -661,16 +733,20 @@ class Notifier:
         change_pct: float,
         current_price: float,
         ref_price: float,
+        change_rate_24h: float | None = None,
     ) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
             return
 
         emoji = "🔥" if change_pct >= 0 else "💥"
         label = "급등" if change_pct >= 0 else "급락"
+        chg = _fmt_change(change_rate_24h)
+        chg_line = f"24h 등락: `{chg}`\n" if chg else ""
 
         text = (
             f"{emoji} *[{label}] {_symbol_display(symbol)}*\n\n"
-            f"변동률: `{change_pct:+.2%}`\n"
+            f"캔들 대비 변동: `{change_pct:+.2%}`\n"
+            f"{chg_line}"
             f"현재가: `{current_price:,.2f}` KRW\n"
             f"기준가: `{ref_price:,.2f}` KRW\n\n"
             f"_Spike Alert (15분봉 기준)_"

@@ -101,6 +101,8 @@ class UpbitScanner:
         self._live_price: dict[str, float] = {}
         # symbol → 24h KRW 거래대금 (ticker WS에서 갱신)
         self._volume_krw: dict[str, float] = {}
+        # symbol → 24h 등락률 signed (ticker WS에서 갱신, 예: 0.0512 = +5.12%)
+        self._change_rate: dict[str, float] = {}
 
         self._symbols: list[str] = []
         self._ws: pyupbit.WebSocketManager | None = None
@@ -135,6 +137,10 @@ class UpbitScanner:
 
     def get_live_price(self, symbol: str) -> float | None:
         return self._live_price.get(symbol)
+
+    def get_change_rate(self, symbol: str) -> float | None:
+        """24h 등락률 (signed float, 예: 0.0512 = +5.12%). WS 수신 전이면 None."""
+        return self._change_rate.get(symbol)
 
     def all_symbols(self) -> list[str]:
         return list(self._symbols)
@@ -240,15 +246,18 @@ class UpbitScanner:
         logger.info("scanner.ws_consumer.stopped")
 
     def _handle_ticker(self, msg: dict) -> None:
-        """ticker 메시지에서 현재가 + 24h KRW 거래대금 갱신"""
+        """ticker 메시지에서 현재가 + 24h KRW 거래대금 + 24h 등락률 갱신"""
         code: str = msg.get("code", "")
         price: float = float(msg.get("trade_price", 0))
         vol_krw: float = float(msg.get("acc_trade_price_24h", 0))
+        change_rate = msg.get("signed_change_rate")
 
         if code and price > 0:
             self._live_price[code] = price
         if code and vol_krw > 0:
             self._volume_krw[code] = vol_krw
+        if code and change_rate is not None:
+            self._change_rate[code] = float(change_rate)
 
     # ── 캔들 타이머 루프 ──────────────────────────────────────────────
 

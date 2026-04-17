@@ -301,7 +301,8 @@ class AutoCrypto:
 
             # 5. 알림 + 거래 실행 — HIGH 신뢰도만 발송 (MEDIUM/LOW는 무시)
             if conf_val == "HIGH":
-                await self._notifier.send_signal(decision)
+                change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+                await self._notifier.send_signal(decision, change_rate=change_rate)
 
                 order = await self._trader.execute(decision)
                 if order:
@@ -344,7 +345,8 @@ class AutoCrypto:
                     conditions=[c["key"] for c in conditions],
                     count=len(conditions),
                 )
-                await self._notifier.send_breakout_alert(symbol, conditions, values)
+                change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+                await self._notifier.send_breakout_alert(symbol, conditions, values, change_rate=change_rate)
         except Exception as exc:
             logger.warning(
                 "breakout.check_failed", symbol=symbol, error=str(exc)
@@ -378,7 +380,8 @@ class AutoCrypto:
                             symbol=symbol,
                             conditions=[c["key"] for c in conditions],
                         )
-                        await self._notifier.send_breakout_alert(symbol, conditions, values)
+                        change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+                        await self._notifier.send_breakout_alert(symbol, conditions, values, change_rate=change_rate)
             except Exception as exc:
                 logger.warning("breakout_interval.error", error=str(exc))
 
@@ -420,7 +423,8 @@ class AutoCrypto:
                             label=label,
                             change_pct=f"{change_pct:+.2%}",
                         )
-                        await self._notifier.send_spike_alert(symbol, change_pct, live, ref)
+                        change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+                        await self._notifier.send_spike_alert(symbol, change_pct, live, ref, change_rate_24h=change_rate)
             except Exception as exc:
                 logger.warning("spike_check.error", error=str(exc))
 
@@ -469,7 +473,8 @@ class AutoCrypto:
                     else sig.confidence.value
                 )
                 if conf_val == "HIGH":
-                    await self._notifier.send_signal(decision)
+                    change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+                    await self._notifier.send_signal(decision, change_rate=change_rate)
 
                 logger.info(
                     "initial_analysis.done",

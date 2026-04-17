@@ -119,7 +119,7 @@ def neutral_fallback(
         # NEUTRAL 검증 규칙 없음 — 임의의 유효한 양수값으로 설정
         stop_loss=entry_price - sl_dist,
         take_profit=entry_price + sl_dist * 2,
-        reasoning=f"[FALLBACK] AI 응답 파싱 최종 실패로 관망 신호 반환. 사유: {reason[:200]}",
+        reasoning=f"[FALLBACK] AI 응답 파싱이 최종 실패하여 시장 관망(NEUTRAL) 신호를 반환합니다. 실패 원인: {reason[:200]}",
         key_risks=["AI 파싱 실패", "수동 확인 필요"],
         news_impact="NEUTRAL",
         indicator_summary={"status": "fallback", "reason": "parse_error"},

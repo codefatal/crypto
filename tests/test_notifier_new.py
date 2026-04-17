@@ -46,8 +46,8 @@ class TestSendSignalBrief:
              patch.object(notifier, "_telegram_signal_brief", new_callable=AsyncMock) as t_mock:
             await notifier.send_signal_brief(decision)
 
-        d_mock.assert_called_once_with(decision)
-        t_mock.assert_called_once_with(decision)
+        d_mock.assert_called_once_with(decision, None)
+        t_mock.assert_called_once_with(decision, None)
 
     @pytest.mark.asyncio
     async def test_discord_brief_skips_when_no_webhook(self):

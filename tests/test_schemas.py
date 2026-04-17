@@ -50,7 +50,7 @@ class TestTradeSignalSchema:
             entry_price=100.0,
             stop_loss=103.0,   # SHORT: SL > entry
             take_profit=94.0,  # SHORT: TP < entry
-            reasoning="Supertrend 약세, EMA 역배열, RSI 72로 과매수 구간 진입 신호",
+            reasoning="Supertrend 약세, EMA 역배열, RSI 72로 과매수 구간 진입으로 숏 신호 발생",
             key_risks=["갑작스러운 급등 가능성"],
             news_impact="NEGATIVE",
             indicator_summary={"supertrend": "bear"},
