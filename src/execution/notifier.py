@@ -82,7 +82,7 @@ def _symbol_display(symbol: str) -> str:
 
 from config import get_settings
 from src.ai.schemas import AIDecision, SignalType
-from src.data.news_fetcher import DominanceData
+from src.data.news_fetcher import DominanceData, MarketOverviewItem
 
 logger = structlog.get_logger(__name__)
 
@@ -170,6 +170,18 @@ class Notifier:
         await asyncio.gather(
             self._discord_dominance(data),
             self._telegram_dominance(data),
+            return_exceptions=True,
+        )
+
+    async def send_market_overview(
+        self,
+        gainers: list[MarketOverviewItem],
+        losers: list[MarketOverviewItem],
+    ) -> None:
+        """급등/급락 상위 코인 현황을 Discord + Telegram으로 발송"""
+        await asyncio.gather(
+            self._discord_market_overview(gainers, losers),
+            self._telegram_market_overview(gainers, losers),
             return_exceptions=True,
         )
 
@@ -283,6 +295,50 @@ class Notifier:
                 },
             ],
             "footer": {"text": f"{emoji} {conf_val} | {decision.model_version}"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
+
+    async def _discord_market_overview(
+        self,
+        gainers: list[MarketOverviewItem],
+        losers: list[MarketOverviewItem],
+    ) -> None:
+        webhook_url = self._settings.discord_webhook_url or \
+                      self._settings.discord_signal_webhook_url
+        if not webhook_url:
+            return
+        if not gainers and not losers:
+            return
+
+        def _fmt_rows(items: list[MarketOverviewItem]) -> str:
+            lines = []
+            for i, item in enumerate(items, 1):
+                name = _symbol_display(item.symbol)
+                pct  = item.change_rate * 100
+                sign = "▲" if pct >= 0 else "▼"
+                lines.append(f"`{i}.` {name}  {sign} **{pct:+.2f}%**")
+            return "\n".join(lines) if lines else "데이터 없음"
+
+        fields = []
+        if gainers:
+            fields.append({
+                "name": "🔥 급등 TOP 5",
+                "value": _fmt_rows(gainers),
+                "inline": False,
+            })
+        if losers:
+            fields.append({
+                "name": "💥 급락 TOP 5",
+                "value": _fmt_rows(losers),
+                "inline": False,
+            })
+
+        embed = {
+            "title": "📊 시장 등락률 현황 (24h)",
+            "color": 0x5865F2,  # 인디고 — 기존 알림과 구별
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "fields": fields,
+            "footer": {"text": "Upbit KRW 전 종목 기준"},
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
 
@@ -550,6 +606,34 @@ class Notifier:
             f"_{emoji} {conf_val} | {decision.model_version}_"
         )
         await self._telegram_plain(text)
+
+    async def _telegram_market_overview(
+        self,
+        gainers: list[MarketOverviewItem],
+        losers: list[MarketOverviewItem],
+    ) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+        if not gainers and not losers:
+            return
+
+        def _fmt_rows(items: list[MarketOverviewItem]) -> str:
+            lines = []
+            for i, item in enumerate(items, 1):
+                name = _symbol_display(item.symbol)
+                pct  = item.change_rate * 100
+                sign = "▲" if pct >= 0 else "▼"
+                lines.append(f"{i}. {name}  {sign} `{pct:+.2f}%`")
+            return "\n".join(lines) if lines else "데이터 없음"
+
+        parts = ["📊 *시장 등락률 현황 (24h)*\n"]
+        if gainers:
+            parts.append(f"🔥 *급등 TOP 5*\n{_fmt_rows(gainers)}")
+        if losers:
+            parts.append(f"\n💥 *급락 TOP 5*\n{_fmt_rows(losers)}")
+        parts.append("\n_Upbit KRW 전 종목 기준_")
+
+        await self._telegram_plain("\n".join(parts))
 
     async def _telegram_dominance(self, data: DominanceData) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:

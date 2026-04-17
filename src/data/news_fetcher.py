@@ -427,6 +427,55 @@ async def fetch_btc_dominance() -> DominanceData:
     return DominanceData.unknown()
 
 
+# ── 시장 등락률 스냅샷 ────────────────────────────────────────────────
+
+_UPBIT_TICKER_URL = "https://api.upbit.com/v1/ticker"
+
+
+@dataclass
+class MarketOverviewItem:
+    symbol: str
+    change_rate: float   # signed rate, e.g. 0.052 = +5.2%
+    trade_price: float
+
+
+async def fetch_market_overview(top_n: int = 5) -> tuple[list[MarketOverviewItem], list[MarketOverviewItem]]:
+    """
+    업비트 KRW 전 종목의 24h 등락률을 조회하여 급등 상위 / 급락 상위를 반환합니다.
+
+    Returns:
+        (gainers, losers) — 각각 top_n개, 등락률 절댓값 내림차순
+    """
+    try:
+        import pyupbit  # 로컬 전용 import (Binance 모드에서는 미설치 가능)
+        symbols: list[str] = await asyncio.to_thread(pyupbit.get_tickers, fiat="KRW")
+        markets = ",".join(symbols)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(_UPBIT_TICKER_URL, params={"markets": markets})
+            resp.raise_for_status()
+            data: list[dict] = resp.json()
+
+        items = [
+            MarketOverviewItem(
+                symbol=d["market"],
+                change_rate=float(d.get("signed_change_rate", 0)),
+                trade_price=float(d.get("trade_price", 0)),
+            )
+            for d in data
+            if isinstance(d, dict) and "market" in d
+        ]
+
+        sorted_items = sorted(items, key=lambda x: x.change_rate, reverse=True)
+        gainers = sorted_items[:top_n]
+        losers  = list(reversed(sorted_items[-top_n:]))
+        return gainers, losers
+
+    except Exception as exc:
+        logger.warning("market_overview.fetch_failed", error=str(exc))
+        return [], []
+
+
 # ── NewsFetcher 클래스 ────────────────────────────────────────────────
 
 class NewsFetcher:

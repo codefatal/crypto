@@ -28,7 +28,7 @@ from structlog.dev import ConsoleRenderer
 
 from config import get_settings
 from src.ai.analyzer import AIAnalyzer
-from src.data.news_fetcher import NewsContext, NewsFetcher, fetch_btc_dominance
+from src.data.news_fetcher import NewsContext, NewsFetcher, fetch_btc_dominance, fetch_market_overview
 from src.execution.logger import ReasoningLogger
 from src.execution.notifier import Notifier
 from src.indicator.bakkta import BakktaIndicator
@@ -224,6 +224,7 @@ class AutoCrypto:
         # 인터벌 기반 알림 루프 (AI 분석 독립)
         asyncio.create_task(self._breakout_interval_loop())   # 5분마다 돌파 체크
         asyncio.create_task(self._spike_check_loop())         # 1분마다 급등락 체크
+        asyncio.create_task(self._market_overview_loop())     # 시작 즉시 + 매시간 시장 현황
 
         try:
             await self._scanner.start()
@@ -469,8 +470,6 @@ class AutoCrypto:
                 )
                 if conf_val == "HIGH":
                     await self._notifier.send_signal(decision)
-                else:
-                    await self._notifier.send_signal_brief(decision)
 
                 logger.info(
                     "initial_analysis.done",
@@ -480,6 +479,24 @@ class AutoCrypto:
                 )
             except Exception as exc:
                 logger.warning("initial_analysis.failed", symbol=symbol, error=str(exc))
+
+    async def _market_overview_loop(self) -> None:
+        """최초 실행 즉시 + 매시간 정각(+10초 버퍼)에 급등/급락 TOP 5 현황 발송."""
+        first_run = True
+        while self._running:
+            if not first_run:
+                now = datetime.now(tz=timezone.utc)
+                elapsed = now.minute * 60 + now.second + now.microsecond / 1e6
+                wait_sec = max(3600.0 - elapsed, 0.0) + 10.0
+                await asyncio.sleep(wait_sec)
+            first_run = False
+            if not self._running:
+                break
+            try:
+                gainers, losers = await fetch_market_overview(top_n=5)
+                await self._notifier.send_market_overview(gainers, losers)
+            except Exception as exc:
+                logger.warning("market_overview.loop_error", error=str(exc))
 
     async def _dominance_check_loop(self) -> None:
         """최초 실행 즉시 + 매시간 정각(+5초 버퍼)에 BTC 도미넌스를 체크하고 알림 발송."""

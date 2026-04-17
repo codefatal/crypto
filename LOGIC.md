@@ -28,6 +28,10 @@
     [E] _spike_check_loop()        — 1분마다
             └─ live_price vs 마지막 확정 캔들 종가 비교
                ±10% 이상 + cooldown(60분) 통과 → 급등락 알림 발송
+
+    [F] _market_overview_loop()    — 시작 즉시 + 매시간 정각
+            └─ 업비트 전 종목 24h 등락률 조회
+               급등 TOP 5 / 급락 TOP 5 알림 발송
 ```
 
 ---
@@ -132,9 +136,12 @@
 | 돌파 알림 | 규칙 기반 3/5 이상 충족 | 하늘색 `#00BFFF` | Discord signal webhook + Telegram |
 | 급등 알림 | 현재가 vs 기준가 +10% 이상 | 주황 `#FF8C00` | Discord signal webhook + Telegram |
 | 급락 알림 | 현재가 vs 기준가 -10% 이상 | 보라 `#9400D3` | Discord signal webhook + Telegram |
+| 시장 현황 TOP 5 | 시작 즉시 + 매시간 정각 | 인디고 `#5865F2` | Discord main webhook + Telegram |
 | 도미넌스 리포트 | 시작 즉시 + 매시간 정각 | — | Discord main webhook + Telegram |
 | 시스템 상태 | 시작 시 1회 | — | Discord main webhook + Telegram |
 | 에러 알림 | 예외 발생 | — | Discord main webhook + Telegram |
+
+> **AI 시작 알림**: 시작 시 BTC/ETH AI 분석에서 **HIGH만 알림 발송** — MEDIUM/LOW는 무시
 
 ---
 
@@ -152,3 +159,4 @@
 |---|---|---|---|---|
 | `_breakout_interval_loop` | 5분 | 캐시된 15분봉 DataFrame | 심볼별 15분 | 없음 |
 | `_spike_check_loop` | 1분 | WS live_price + 캐시 종가 | 심볼별 60분 | 없음 |
+| `_market_overview_loop` | 시작 즉시 + 매시간 | Upbit REST /v1/ticker | 없음 | 1회/시간 |
