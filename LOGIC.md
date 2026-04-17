@@ -12,7 +12,7 @@
     │       └─ Score ≥ 70 + LONG/SHORT → AI 분석 진행
     │
     ├─ [B] check_breakout_signals()    → 독립 실행 (비블로킹, 캔들 경계마다)
-    │       └─ 5개 중 3개 이상 충족 → 즉시 알림 발송
+    │       └─ 5개 조건 모두 충족 → 즉시 알림 발송
     │
     └─ [C] AIAnalyzer.analyze()        → Groq LLM 호출
             └─ confidence = HIGH → 전체 알림 + 실거래 (HIGH만)
@@ -23,7 +23,7 @@
 
     [D] _breakout_interval_loop()  — 5분마다
             └─ 캐시된 15분봉 기준 check_breakout_signals()
-               3개 이상 충족 + cooldown(15분) 통과 → 알림 발송
+               5개 조건 모두 충족 + cooldown(15분) 통과 → 알림 발송
 
     [E] _spike_check_loop()        — 1분마다
             └─ live_price vs 마지막 확정 캔들 종가 비교
@@ -64,7 +64,7 @@
 
 ---
 
-## [B/D] 규칙 기반 돌파 알림 — 5개 중 3개 이상 OR 조건
+## [B/D] 규칙 기반 돌파 알림 — 5개 조건 전부 AND 조건
 
 | # | 지표 | 조건 | 임계값 | 알림 예시 |
 |---|---|---|---|---|
@@ -74,7 +74,7 @@
 | 4 | 거래량 비율 (현재 / MA20) | ≥ | 2.0배 | `거래량 폭등 (2.8배)` |
 | 5 | ADX (14) | > | 20 | `ADX 20 돌파 (현재 24.1)` |
 
-- **5개 중 3개 이상 충족 시에만 알림 발송** (`_BREAKOUT_MIN_CONDITIONS = 3`)
+- **5개 조건 모두 충족 시에만 알림 발송** (`_BREAKOUT_MIN_CONDITIONS = 5`)
 - NaN 값은 조건 미충족으로 처리
 - 최소 캔들 수: 35개 미만이면 전체 스킵
 - **[B]** 캔들 경계(15분봉 확정 시)마다 `asyncio.create_task`로 비블로킹 실행
@@ -87,7 +87,7 @@
 | confidence | signal | 동작 |
 |---|---|---|
 | HIGH | LONG/SHORT | Discord/Telegram 전체 알림 + 실거래 실행 |
-| MEDIUM / LOW | LONG/SHORT | 무시 (알림/거래 없음) |
+| MEDIUM / LOW | LONG/SHORT | 무시 (알림/거래 없음) — BTC 포함 전 심볼 동일 |
 | — | NEUTRAL | 무시 |
 | — | — (fallback) | DB 기록만 (알림/거래 없음) |
 
@@ -133,7 +133,7 @@
 | 알림 종류 | 트리거 | 색상 | 채널 |
 |---|---|---|---|
 | 매매 신호 (전체) | AI HIGH | 초록(LONG) / 빨강(SHORT) | Discord signal webhook + Telegram |
-| 돌파 알림 | 규칙 기반 3/5 이상 충족 | 하늘색 `#00BFFF` | Discord signal webhook + Telegram |
+| 돌파 알림 | 규칙 기반 5/5 모두 충족 | 하늘색 `#00BFFF` | Discord signal webhook + Telegram |
 | 급등 알림 | 현재가 vs 기준가 +10% 이상 | 주황 `#FF8C00` | Discord signal webhook + Telegram |
 | 급락 알림 | 현재가 vs 기준가 -10% 이상 | 보라 `#9400D3` | Discord signal webhook + Telegram |
 | 시장 현황 TOP 5 | 시작 즉시 + 매시간 정각 | 인디고 `#5865F2` | Discord main webhook + Telegram |
@@ -141,7 +141,7 @@
 | 시스템 상태 | 시작 시 1회 | — | Discord main webhook + Telegram |
 | 에러 알림 | 예외 발생 | — | Discord main webhook + Telegram |
 
-> **AI 시작 알림**: 시작 시 BTC/ETH AI 분석에서 **HIGH만 알림 발송** — MEDIUM/LOW는 무시
+> **AI 알림 기준**: HIGH 신뢰도만 알림 발송 (시작 시 BTC/ETH 포함 전 심볼) — MEDIUM/LOW는 무시
 
 ---
 
@@ -149,7 +149,19 @@
 
 알림 메시지의 심볼은 `KRW-BTC(비트코인)` 형식으로 표기됩니다.
 매핑이 없는 심볼은 `KRW-XXXX` 원본 그대로 표시됩니다.
-매핑 목록: `src/execution/notifier.py` → `_COIN_NAMES` 딕셔너리 (50개+ 주요 코인)
+매핑 목록: `src/execution/notifier.py` → `_COIN_NAMES` 딕셔너리 (약 50개 주요 코인)
+- 모든 한글 값은 `\uXXXX` 유니코드 이스케이프로 저장 — Windows/Linux 인코딩 차이 무관
+
+---
+
+## 알림 Rate Limit 처리 (Discord / Telegram)
+
+| 플랫폼 | 제한 | 대응 |
+|---|---|---|
+| Discord | 30 req/min per webhook | `_DISCORD_SEMAPHORE = asyncio.Semaphore(1)` 직렬화 + 429 시 `retry_after` JSON 파싱 후 대기 |
+| Telegram | 1 msg/sec (동일 채팅) | `_TELEGRAM_SEMAPHORE = asyncio.Semaphore(1)` 직렬화 + 429 시 `parameters.retry_after` 파싱 후 대기 |
+
+- 최대 3회 재시도 후 실패 시 로그만 남기고 계속 진행 (`return_exceptions=True`)
 
 ---
 
