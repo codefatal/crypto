@@ -28,7 +28,9 @@ from structlog.dev import ConsoleRenderer
 
 from config import get_settings
 from src.ai.analyzer import AIAnalyzer
+from src.data.market_fetcher import fetch_market_briefing, fetch_btc_usd_price
 from src.data.news_fetcher import NewsContext, NewsFetcher, fetch_btc_dominance, fetch_market_overview
+from src.data.notice_monitor import NoticeMonitor
 from src.execution.logger import ReasoningLogger
 from src.execution.notifier import Notifier
 from src.indicator.bakkta import BakktaIndicator
@@ -189,6 +191,11 @@ class AutoCrypto:
         # 인터벌 알림 cooldown (symbol → last_alert_epoch_sec)
         self._breakout_cooldown: dict[str, float] = {}
         self._spike_cooldown: dict[str, float] = {}
+        self._extreme_cooldown: dict[str, float] = {}  # "{symbol}:{type}" → epoch
+
+        # 공지 모니터 + APScheduler
+        self._notice_monitor = NoticeMonitor()
+        self._scheduler = None   # APScheduler AsyncIOScheduler (지연 임포트)
 
     async def start(self) -> None:
         logger.info(
@@ -225,6 +232,10 @@ class AutoCrypto:
         asyncio.create_task(self._breakout_interval_loop())   # 5분마다 돌파 체크
         asyncio.create_task(self._spike_check_loop())         # 1분마다 급등락 체크
         asyncio.create_task(self._market_overview_loop())     # 시작 즉시 + 매시간 시장 현황
+        asyncio.create_task(self._notice_monitor_loop())      # 5분마다 업비트 공지 감시
+
+        # KST 09:00 / 22:30 정기 거시경제 브리핑 스케줄러
+        self._start_scheduler()
 
         try:
             await self._scanner.start()
@@ -246,6 +257,9 @@ class AutoCrypto:
 
             # 1-b. 규칙 기반 돌파 알림 (AI 분석과 독립적 — 비블로킹)
             asyncio.create_task(self._check_and_alert_breakout(symbol, df))
+
+            # 1-c. 패닉셀/저점/반등 극단 신호 검사 (비블로킹)
+            asyncio.create_task(self._check_extreme_conditions(symbol, df))
 
             # 약한 신호는 AI 호출 없이 조기 종료 (API 비용 절감)
             if not result.is_tradeable(min_score=settings.ai_min_score):
@@ -278,8 +292,6 @@ class AutoCrypto:
             sig_val = (
                 sig.signal if isinstance(sig.signal, str) else sig.signal.value
             )
-            is_btc = _extract_coin(symbol) == "BTC"
-
             logger.info(
                 "pipeline.signal",
                 exchange=self._exchange,
@@ -578,6 +590,113 @@ class AutoCrypto:
         except Exception as exc:
             logger.warning("btc.snapshot_failed", error=str(exc))
 
+    async def _check_extreme_conditions(self, symbol: str, df) -> None:
+        """\ud328\ub2c9\uc140 / \uc800\ud3c9\uac00 / \ubc18\ub4f1 \uad6c\uac04 \uac10\uc9c0 \ud6c4 \uc54c\ub9bc \ubc1c\uc1a1.
+        \ub3d9\uc77c {symbol}:{type} \uc870\ud569\uc740 60\ubd84 cooldown."""
+        _COOLDOWN_SEC = 60 * 60  # 60\ubd84
+        try:
+            from src.indicator.technical import detect_market_extremes
+            signals = detect_market_extremes(df)
+            if not signals:
+                return
+            now = time.monotonic()
+            change_rate = getattr(self._scanner, "get_change_rate", lambda s: None)(symbol)
+            for sig in signals:
+                key = f"{symbol}:{sig.type}"
+                if now - self._extreme_cooldown.get(key, 0.0) < _COOLDOWN_SEC:
+                    continue
+                self._extreme_cooldown[key] = now
+                logger.info(
+                    "extreme.detected",
+                    exchange=self._exchange,
+                    symbol=symbol,
+                    type=sig.type,
+                    name=sig.name,
+                )
+                await self._notifier.send_extreme_alert(symbol, sig, change_rate=change_rate)
+        except Exception as exc:
+            logger.warning("extreme.check_failed", symbol=symbol, error=str(exc))
+
+    async def _notice_monitor_loop(self) -> None:
+        """\uc5c5\ube44\ud2b8 \uacf5\uc9c0 + BTC \ub77c\uc6b4\ub4dc\ud53c\uac70 \ub3cc\ud30c\ub97c 5\ubd84\ub9c8\ub2e4 \ud655\uc778\ud569\ub2c8\ub2e4."""
+        _INTERVAL_SEC = 5 * 60
+
+        while self._running:
+            try:
+                # \uc5c5\ube44\ud2b8 \uacf5\uc9c0 \ud655\uc778
+                new_notices = await self._notice_monitor.check_notices()
+                for notice in new_notices:
+                    logger.info(
+                        "notice.new",
+                        notice_id=notice.notice_id,
+                        title=notice.title,
+                    )
+                    await self._notifier.send_breaking_news(
+                        title=notice.title,
+                        url=notice.url,
+                        source="\uc5c5\ube44\ud2b8 \uacf5\uc9c0",
+                    )
+
+                # BTC USD \ub77c\uc6b4\ub4dc\ud53c\uac70 \ub3cc\ud30c
+                btc_usd = await fetch_btc_usd_price()
+                round_alerts = await self._notice_monitor.check_btc_round_figures(btc_usd)
+                for alert in round_alerts:
+                    direction_str = "\ub3cc\ud30c" if alert.direction == "above" else "\ud558\ud5a5"
+                    title = (
+                        f"BTC ${alert.level:,} {direction_str}\ub2f5! "
+                        f"\ud604\uc7ac\uac00 ${alert.price:,.0f}"
+                    )
+                    logger.info(
+                        "btc.round_figure",
+                        level=alert.level,
+                        direction=alert.direction,
+                        price=alert.price,
+                    )
+                    await self._notifier.send_breaking_news(
+                        title=title,
+                        url="https://coinmarketcap.com/currencies/bitcoin/",
+                        source="BTC \ub77c\uc6b4\ub4dc\ud53c\uac70",
+                    )
+            except Exception as exc:
+                logger.warning("notice_monitor.loop_error", error=str(exc))
+
+            await asyncio.sleep(_INTERVAL_SEC)
+
+    def _start_scheduler(self) -> None:
+        """APScheduler AsyncIOScheduler\ub97c \uc124\uc815\ud558\uace0 KST 09:00 / 22:30 \ube0c\ub9ac\ud551\uc744 \ub4f1\ub85d\ud569\ub2c8\ub2e4."""
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            self._scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+            self._scheduler.add_job(
+                self._send_scheduled_briefing,
+                trigger="cron",
+                hour=9,
+                minute=0,
+                id="briefing_morning",
+            )
+            self._scheduler.add_job(
+                self._send_scheduled_briefing,
+                trigger="cron",
+                hour=22,
+                minute=30,
+                id="briefing_evening",
+            )
+            self._scheduler.start()
+            logger.info("scheduler.started", jobs=["briefing_morning", "briefing_evening"])
+        except ImportError:
+            logger.warning("scheduler.apscheduler_missing")
+        except Exception as exc:
+            logger.warning("scheduler.start_failed", error=str(exc))
+
+    async def _send_scheduled_briefing(self) -> None:
+        """\uc2a4\ucf00\uc904\ub7ec \ud638\ucd9c: \uac70\uc2dc\uacbd\uc81c \ube0c\ub9ac\ud551\uc744 \uc218\uc9d1\ud558\uc5ec \ubc1c\uc1a1\ud569\ub2c8\ub2e4."""
+        try:
+            briefing = await fetch_market_briefing()
+            await self._notifier.send_market_briefing(briefing)
+            logger.info("briefing.sent")
+        except Exception as exc:
+            logger.warning("briefing.failed", error=str(exc))
+
     async def _shutdown(self) -> None:
         logger.info("autocrypto.shutting_down", exchange=self._exchange)
         self._running = False
@@ -585,6 +704,11 @@ class AutoCrypto:
             self._news_refresh_task.cancel()
         if self._dominance_task:
             self._dominance_task.cancel()
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                pass
         await self._scanner.stop()
         await self._trader.close()
         await self._notifier.send_system_status(

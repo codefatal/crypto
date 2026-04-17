@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 import httpx
 import structlog
 
+from config import get_settings
+from src.ai.schemas import AIDecision, SignalType
+from src.data.market_fetcher import MarketBriefing
+from src.data.news_fetcher import DominanceData, MarketOverviewItem
+from src.indicator.technical import ExtremeSignal
+
 # Discord 웹훅은 웹훅 URL별로 30 req/min 제한이 있음.
 # 동시 발송을 직렬화하여 burst 429를 방지한다.
 _DISCORD_SEMAPHORE = asyncio.Semaphore(1)
@@ -88,9 +94,23 @@ def _fmt_change(rate: float | None) -> str | None:
     arrow = "\u25b2" if rate >= 0 else "\u25bc"  # ▲ / ▼
     return f"{arrow} {rate:+.2%}"
 
-from config import get_settings
-from src.ai.schemas import AIDecision, SignalType
-from src.data.news_fetcher import DominanceData, MarketOverviewItem
+
+def _fmt_price(price: float | None) -> str:
+    """\uac00\uaca9 \ud3ec\ub9f7. None \ub610\ub294 0\uc774\uba74 'N/A' \ubc18\ud658."""
+    if price is None or price == 0:
+        return "N/A"
+    if price >= 1_000:
+        return f"{price:,.2f}"
+    return f"{price:.4f}"
+
+
+def _fmt_chg_row(q_name: str, price: float | None, chg_pct: float | None) -> str:
+    """\ud55c \uc904\uc9dc\ub9ac \uc2dc\uc138 \uc694\uc57d (Discord/Telegram \uacf5\uc6a9)."""
+    price_str = _fmt_price(price)
+    if chg_pct is None:
+        return f"{q_name}: `{price_str}`"
+    arrow = "\u25b2" if chg_pct >= 0 else "\u25bc"
+    return f"{q_name}: `{price_str}` {arrow} `{chg_pct:+.2f}%`"
 
 logger = structlog.get_logger(__name__)
 
@@ -223,6 +243,40 @@ class Notifier:
         await asyncio.gather(
             self._discord_spike(symbol, change_pct, current_price, ref_price, change_rate_24h),
             self._telegram_spike(symbol, change_pct, current_price, ref_price, change_rate_24h),
+            return_exceptions=True,
+        )
+
+    async def send_market_briefing(self, briefing: MarketBriefing) -> None:
+        """\uac70\uc2dc\uacbd\uc81c \ube0c\ub9ac\ud551 (KST 09:00 / 22:30 \uc2a4\ucf00\uc904\ub7ec)\uc744 Discord + Telegram\uc73c\ub85c \ubc1c\uc1a1"""
+        await asyncio.gather(
+            self._discord_market_briefing(briefing),
+            self._telegram_market_briefing(briefing),
+            return_exceptions=True,
+        )
+
+    async def send_breaking_news(
+        self,
+        title: str,
+        url: str,
+        source: str = "\uc5c5\ube44\ud2b8 \uacf5\uc9c0",
+    ) -> None:
+        """\uc5c5\ube44\ud2b8 \uc2e0\uaddc \uacf5\uc9c0 / BTC \ub77c\uc6b4\ub4dc\ud53c\uac70 \ub3cc\ud30c \uc18d\ubcf4\ub97c Discord + Telegram\uc73c\ub85c \ubc1c\uc1a1"""
+        await asyncio.gather(
+            self._discord_breaking_news(title, url, source),
+            self._telegram_breaking_news(title, url, source),
+            return_exceptions=True,
+        )
+
+    async def send_extreme_alert(
+        self,
+        symbol: str,
+        signal: ExtremeSignal,
+        change_rate: float | None = None,
+    ) -> None:
+        """\ud328\ub2c9\uc140 / \uc800\ud3c9\uac00 / \ubc18\ub4f1 \uc2e0\ud638\ub97c Discord + Telegram\uc73c\ub85c \ubc1c\uc1a1"""
+        await asyncio.gather(
+            self._discord_extreme(symbol, signal, change_rate),
+            self._telegram_extreme(symbol, signal, change_rate),
             return_exceptions=True,
         )
 
@@ -552,6 +606,117 @@ class Notifier:
         }
         await self._discord_post(webhook_url, {"embeds": [embed]})
 
+    async def _discord_market_briefing(self, briefing: MarketBriefing) -> None:
+        webhook_url = self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        fields = []
+
+        # \uac70\uc2dc\uacbd\uc81c \uc9c0\uc218 \uc139\uc158
+        if briefing.indices:
+            rows = "\n".join(_fmt_chg_row(q.name, q.price, q.change_pct) for q in briefing.indices)
+            fields.append({
+                "name": "\U0001f4ca \ubbf8\uad6d/\ud55c\uad6d \uc8fc\uc2dd \uc9c0\uc218",
+                "value": rows,
+                "inline": False,
+            })
+
+        # \uc8fc\ub3c4\uc8fc / \uc554\ud638\ud654\ud3d0
+        if briefing.leaders:
+            rows = "\n".join(_fmt_chg_row(q.name, q.price, q.change_pct) for q in briefing.leaders)
+            fields.append({
+                "name": "\U0001f4bc \uc8fc\ub3c4\uc8fc / \uc554\ud638\ud654\ud3d0",
+                "value": rows,
+                "inline": False,
+            })
+
+        # \uacf5\ud3ec\ud0d0\uc695
+        if briefing.fear_greed is not None:
+            fg = briefing.fear_greed
+            fg_emoji = "\U0001f7e2" if fg >= 60 else ("\U0001f7e1" if fg >= 40 else "\U0001f534")
+            fields.append({
+                "name": "\U0001f9e0 \uacf5\ud3ec\ud0d0\uc695 \uc9c0\uc218",
+                "value": f"{fg_emoji} `{fg}` — {briefing.fear_label or 'N/A'}",
+                "inline": False,
+            })
+
+        if not fields:
+            return
+
+        embed = {
+            "title": "\U0001f30f \uac70\uc2dc\uacbd\uc81c \ube0c\ub9ac\ud551",
+            "color": 0x4169E1,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "fields": fields,
+            "footer": {"text": "Scheduled Market Briefing"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
+
+    async def _discord_breaking_news(
+        self, title: str, url: str, source: str
+    ) -> None:
+        webhook_url = self._settings.discord_webhook_url or \
+                      self._settings.discord_signal_webhook_url
+        if not webhook_url:
+            return
+
+        embed = {
+            "title": f"\U0001f4e2 [{source}] {title[:200]}",
+            "url": url,
+            "color": 0xFF6B35,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "footer": {"text": "Breaking News"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
+
+    async def _discord_extreme(
+        self, symbol: str, signal: ExtremeSignal, change_rate: float | None
+    ) -> None:
+        webhook_url = self._settings.discord_signal_webhook_url or \
+                      self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        color_map = {
+            "panic_sell":  0xFF2222,
+            "undervalued": 0x00CC66,
+            "rebound":     0xFFAA00,
+        }
+        color = color_map.get(signal.type, 0x888888)
+
+        reasons_text = "\n".join(f"• {r}" for r in signal.reasons) or "N/A"
+        fields: list[dict] = [
+            {
+                "name": "\U0001f4cb \uac10\uc9c0 \uc774\uc720",
+                "value": reasons_text,
+                "inline": False,
+            },
+        ]
+        if signal.values:
+            val_text = " | ".join(f"{k}: `{v}`" for k, v in signal.values.items())
+            fields.append({
+                "name": "\U0001f4c8 \uc9c0\ud45c\uac12",
+                "value": val_text[:512],
+                "inline": False,
+            })
+        chg = _fmt_change(change_rate)
+        if chg:
+            fields.append({
+                "name": "\U0001f4ca 24h \ub4f1\ub77d",
+                "value": f"`{chg}`",
+                "inline": True,
+            })
+
+        embed = {
+            "title": f"{signal.emoji} [{signal.name}] {_symbol_display(symbol)}",
+            "color": color,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "fields": fields,
+            "footer": {"text": "Extreme Signal Alert"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
+
     async def _discord_plain(self, content: str, webhook_url: str) -> None:
         if not webhook_url:
             return
@@ -750,6 +915,67 @@ class Notifier:
             f"현재가: `{current_price:,.2f}` KRW\n"
             f"기준가: `{ref_price:,.2f}` KRW\n\n"
             f"_Spike Alert (15분봉 기준)_"
+        )
+        await self._telegram_plain(text)
+
+    async def _telegram_market_briefing(self, briefing: MarketBriefing) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        parts = ["\U0001f30f *\uac70\uc2dc\uacbd\uc81c \ube0c\ub9ac\ud551*\n"]
+
+        if briefing.indices:
+            rows = "\n".join(_fmt_chg_row(q.name, q.price, q.change_pct) for q in briefing.indices)
+            parts.append(f"\U0001f4ca *\uc8fc\uc2dd \uc9c0\uc218*\n{rows}")
+
+        if briefing.leaders:
+            rows = "\n".join(_fmt_chg_row(q.name, q.price, q.change_pct) for q in briefing.leaders)
+            parts.append(f"\U0001f4bc *\uc8fc\ub3c4\uc8fc / \uc554\ud638\ud654\ud3d0*\n{rows}")
+
+        if briefing.fear_greed is not None:
+            fg = briefing.fear_greed
+            fg_emoji = "\U0001f7e2" if fg >= 60 else ("\U0001f7e1" if fg >= 40 else "\U0001f534")
+            parts.append(f"\U0001f9e0 *\uacf5\ud3ec\ud0d0\uc695*: `{fg}` {fg_emoji} {briefing.fear_label or ''}")
+
+        if len(parts) <= 1:
+            return
+
+        await self._telegram_plain("\n\n".join(parts))
+
+    async def _telegram_breaking_news(
+        self, title: str, url: str, source: str
+    ) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        text = (
+            f"\U0001f4e2 *[{source}] \uc18d\ubcf4*\n\n"
+            f"{title[:400]}\n\n"
+            f"[{source}\uc5d0\uc11c \ubcf4\uae30]({url})"
+        )
+        await self._telegram_plain(text)
+
+    async def _telegram_extreme(
+        self, symbol: str, signal: ExtremeSignal, change_rate: float | None
+    ) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        reasons_text = "\n".join(f"  • {r}" for r in signal.reasons) or "  N/A"
+        chg = _fmt_change(change_rate)
+        chg_line = f"24h \ub4f1\ub77d: `{chg}`\n" if chg else ""
+
+        val_text = ""
+        if signal.values:
+            val_text = "\n\U0001f4c8 *\uc9c0\ud45c\uac12*\n" + " | ".join(
+                f"{k}: `{v}`" for k, v in signal.values.items()
+            )
+
+        text = (
+            f"{signal.emoji} *[{signal.name}] {_symbol_display(symbol)}*\n\n"
+            f"\U0001f4cb *\uac10\uc9c0 \uc774\uc720*\n{reasons_text}\n\n"
+            f"{chg_line}"
+            f"{val_text}"
         )
         await self._telegram_plain(text)
 
