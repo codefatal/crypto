@@ -35,6 +35,9 @@ _THRESHOLDS = {
 # 최소 캔들 수 (ADX/MACD 계산에 필요한 최솟값 보장)
 _MIN_CANDLES = 35
 
+# 돌파 알림 발동 최소 조건 수 (5개 중 N개 이상 충족 시 알림)
+_BREAKOUT_MIN_CONDITIONS = 3
+
 
 # ── 공개 함수 ──────────────────────────────────────────────────────────
 
@@ -168,7 +171,7 @@ def check_breakout_signals(
             "threshold": _THRESHOLDS["adx"],
         })
 
-    triggered = len(triggered_conditions) > 0
+    triggered = len(triggered_conditions) >= _BREAKOUT_MIN_CONDITIONS
     return triggered, triggered_conditions, values
 
 

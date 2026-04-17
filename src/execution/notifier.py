@@ -16,6 +16,70 @@ import structlog
 # 동시 발송을 직렬화하여 burst 429를 방지한다.
 _DISCORD_SEMAPHORE = asyncio.Semaphore(1)
 
+# 업비트 KRW 마켓 심볼 → 한국어 코인명 매핑
+_COIN_NAMES: dict[str, str] = {
+    "KRW-BTC":   "비트코인",
+    "KRW-ETH":   "이더리움",
+    "KRW-XRP":   "리플",
+    "KRW-SOL":   "솔라나",
+    "KRW-DOGE":  "도지코인",
+    "KRW-ADA":   "에이다",
+    "KRW-AVAX":  "아발란체",
+    "KRW-DOT":   "폴카닷",
+    "KRW-LINK":  "체인링크",
+    "KRW-TRX":   "트론",
+    "KRW-SHIB":  "시바이누",
+    "KRW-LTC":   "라이트코인",
+    "KRW-BCH":   "비트코인캐시",
+    "KRW-ETC":   "이더리움클래식",
+    "KRW-NEAR":  "니어프로토콜",
+    "KRW-ATOM":  "코스모스",
+    "KRW-UNI":   "유니스왑",
+    "KRW-ICP":   "인터넷컴퓨터",
+    "KRW-APT":   "앱토스",
+    "KRW-SUI":   "수이",
+    "KRW-ARB":   "아비트럼",
+    "KRW-OP":    "옵티미즘",
+    "KRW-MATIC": "폴리곤",
+    "KRW-FIL":   "파일코인",
+    "KRW-SAND":  "더샌드박스",
+    "KRW-MANA":  "디센트럴랜드",
+    "KRW-AAVE":  "에이브",
+    "KRW-VET":   "비체인",
+    "KRW-XLM":   "스텔라루멘",
+    "KRW-HBAR":  "헤데라",
+    "KRW-ALGO":  "알고랜드",
+    "KRW-STX":   "스택스",
+    "KRW-GRT":   "더그래프",
+    "KRW-FLOW":  "플로우",
+    "KRW-CHZ":   "칠리즈",
+    "KRW-SNX":   "신세틱스",
+    "KRW-COMP":  "컴파운드",
+    "KRW-MKR":   "메이커",
+    "KRW-BAT":   "베이직어텐션토큰",
+    "KRW-ICX":   "아이콘",
+    "KRW-EOS":   "이오스",
+    "KRW-QTUM":  "퀀텀",
+    "KRW-XTZ":   "테조스",
+    "KRW-IOTA":  "아이오타",
+    "KRW-IOST":  "아이오에스티",
+    "KRW-ONT":   "온톨로지",
+    "KRW-ZIL":   "질리카",
+    "KRW-STEEM": "스팀",
+    "KRW-SC":    "시아코인",
+    "KRW-LSK":   "리스크",
+    "KRW-KAVA":  "카바",
+    "KRW-MTL":   "메탈",
+    "KRW-GLM":   "골렘",
+    "KRW-SNT":   "스테이터스",
+}
+
+
+def _symbol_display(symbol: str) -> str:
+    """'KRW-BTC' → 'KRW-BTC(비트코인)'  /  매핑 없으면 원본 반환"""
+    name = _COIN_NAMES.get(symbol)
+    return f"{symbol}({name})" if name else symbol
+
 from config import get_settings
 from src.ai.schemas import AIDecision, SignalType
 from src.data.news_fetcher import DominanceData
@@ -122,6 +186,20 @@ class Notifier:
             return_exceptions=True,
         )
 
+    async def send_spike_alert(
+        self,
+        symbol: str,
+        change_pct: float,
+        current_price: float,
+        ref_price: float,
+    ) -> None:
+        """급등/급락(±10% 이상) 알림을 Discord + Telegram으로 발송"""
+        await asyncio.gather(
+            self._discord_spike(symbol, change_pct, current_price, ref_price),
+            self._telegram_spike(symbol, change_pct, current_price, ref_price),
+            return_exceptions=True,
+        )
+
     # ── Discord ───────────────────────────────────────────────────────
 
     async def _discord_breakout(
@@ -150,7 +228,7 @@ class Notifier:
         )
 
         embed = {
-            "title": f"🚀 [돌파 감지] {symbol} 기술적 조건 충족!",
+            "title": f"🚀 [돌파 감지] {_symbol_display(symbol)} 기술적 조건 충족!",
             "color": 0x00BFFF,  # 하늘색 — AI 신호(초록/빨강)와 구별
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "fields": [
@@ -184,7 +262,7 @@ class Notifier:
         conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
 
         embed = {
-            "title": f"₿ {decision.symbol} — {sig_val} (BTC 알림)",
+            "title": f"₿ {_symbol_display(decision.symbol)} — {sig_val} (BTC 알림)",
             "color": color,
             "timestamp": decision.timestamp,
             "fields": [
@@ -268,7 +346,7 @@ class Notifier:
         risks = "\n".join(f"• {r}" for r in sig.key_risks) if sig.key_risks else "없음"
 
         embed = {
-            "title": f"{emoji} {decision.symbol} — {sig_val}",
+            "title": f"{emoji} {_symbol_display(decision.symbol)} — {sig_val}",
             "color": color,
             "timestamp": decision.timestamp,
             "fields": [
@@ -318,6 +396,48 @@ class Notifier:
 
         payload = {"embeds": [embed]}
         await self._discord_post(webhook_url, payload)
+
+    async def _discord_spike(
+        self,
+        symbol: str,
+        change_pct: float,
+        current_price: float,
+        ref_price: float,
+    ) -> None:
+        webhook_url = self._settings.discord_signal_webhook_url or \
+                      self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        is_surge = change_pct >= 0
+        emoji = "🔥" if is_surge else "💥"
+        label = "급등" if is_surge else "급락"
+        color = 0xFF8C00 if is_surge else 0x9400D3  # 주황 / 보라
+
+        embed = {
+            "title": f"{emoji} [{label}] {_symbol_display(symbol)} {change_pct:+.1%} 이상 변동!",
+            "color": color,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "fields": [
+                {
+                    "name": "📌 현재가",
+                    "value": f"`{current_price:,.2f}` KRW",
+                    "inline": True,
+                },
+                {
+                    "name": "📊 기준가 (마지막 확정 캔들)",
+                    "value": f"`{ref_price:,.2f}` KRW",
+                    "inline": True,
+                },
+                {
+                    "name": "📈 변동률",
+                    "value": f"**{change_pct:+.2%}**",
+                    "inline": True,
+                },
+            ],
+            "footer": {"text": "Spike Alert (15분봉 기준)"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
 
     async def _discord_plain(self, content: str, webhook_url: str) -> None:
         if not webhook_url:
@@ -373,7 +493,7 @@ class Notifier:
         risks = "\n".join(f"  • {r}" for r in sig.key_risks) if sig.key_risks else "  없음"
 
         text = (
-            f"{emoji} *{decision.symbol} — {sig_val}*\n\n"
+            f"{emoji} *{_symbol_display(decision.symbol)} — {sig_val}*\n\n"
             f"신뢰도: `{conf_val}` ({sig.confidence_score:.1f}/100)\n"
             f"현재가: `{sig.entry_price:,.6f}`\n"
             f"손절: `{sig.stop_loss:,.6f}`\n"
@@ -401,7 +521,7 @@ class Notifier:
         count = len(triggered_conditions)
 
         text = (
-            f"🚀 *[돌파 감지] {symbol} 기술적 조건 충족!*\n\n"
+            f"🚀 *[돌파 감지] {_symbol_display(symbol)} 기술적 조건 충족!*\n\n"
             f"✅ *충족된 조건 ({count}/5)*\n{cond_lines}\n\n"
             f"📊 *전체 지표 현황*\n"
             f"RSI: `{_fmt(current_values.get('rsi', float('nan')))}` | "
@@ -423,7 +543,7 @@ class Notifier:
         conf_emoji = _CONFIDENCE_EMOJI.get(conf_val, "")
 
         text = (
-            f"₿ *{decision.symbol} — {sig_val}* (BTC 알림)\n\n"
+            f"₿ *{_symbol_display(decision.symbol)} — {sig_val}* (BTC 알림)\n\n"
             f"{conf_emoji} 신뢰도: `{conf_val}` ({sig.confidence_score:.1f}/100)\n"
             f"📌 현재가: `{sig.entry_price:,.2f}`\n\n"
             f"📝 *판단 근거*\n{sig.reasoning[:400]}\n\n"
@@ -451,6 +571,28 @@ class Notifier:
             lines.append(f"💰 전체 시총: `${total_b:,.1f}B`{change_str}")
 
         await self._telegram_plain("\n".join(lines))
+
+    async def _telegram_spike(
+        self,
+        symbol: str,
+        change_pct: float,
+        current_price: float,
+        ref_price: float,
+    ) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        emoji = "🔥" if change_pct >= 0 else "💥"
+        label = "급등" if change_pct >= 0 else "급락"
+
+        text = (
+            f"{emoji} *[{label}] {_symbol_display(symbol)}*\n\n"
+            f"변동률: `{change_pct:+.2%}`\n"
+            f"현재가: `{current_price:,.2f}` KRW\n"
+            f"기준가: `{ref_price:,.2f}` KRW\n\n"
+            f"_Spike Alert (15분봉 기준)_"
+        )
+        await self._telegram_plain(text)
 
     async def _telegram_plain(self, text: str) -> None:
         if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:

@@ -19,6 +19,7 @@ import asyncio
 import os
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -185,6 +186,10 @@ class AutoCrypto:
         self._news_refresh_task: asyncio.Task | None = None
         self._dominance_task: asyncio.Task | None = None
 
+        # 인터벌 알림 cooldown (symbol → last_alert_epoch_sec)
+        self._breakout_cooldown: dict[str, float] = {}
+        self._spike_cooldown: dict[str, float] = {}
+
     async def start(self) -> None:
         logger.info(
             "autocrypto.starting",
@@ -215,6 +220,10 @@ class AutoCrypto:
 
         # 최초 실행: BTC/ETH 지표 계산 + 알림 (스캐너 시작 전)
         asyncio.create_task(self._analyze_initial_coins())
+
+        # 인터벌 기반 알림 루프 (AI 분석 독립)
+        asyncio.create_task(self._breakout_interval_loop())   # 5분마다 돌파 체크
+        asyncio.create_task(self._spike_check_loop())         # 1분마다 급등락 체크
 
         try:
             await self._scanner.start()
@@ -289,9 +298,7 @@ class AutoCrypto:
             # 4. DB 로깅
             decision_id = await asyncio.to_thread(self._db.log_decision, decision)
 
-            # 5. 알림 + 거래 실행
-            # - HIGH 신뢰도: 모든 코인 알림 + 거래
-            # - MEDIUM/LOW:  BTC만 간단 알림 (거래 없음)
+            # 5. 알림 + 거래 실행 — HIGH 신뢰도만 발송 (MEDIUM/LOW는 무시)
             if conf_val == "HIGH":
                 await self._notifier.send_signal(decision)
 
@@ -313,8 +320,6 @@ class AutoCrypto:
                         await asyncio.to_thread(
                             self._db.mark_decision_executed, decision_id
                         )
-            elif is_btc:
-                await self._notifier.send_signal_brief(decision)
 
         except Exception as exc:
             logger.error(
@@ -343,6 +348,82 @@ class AutoCrypto:
             logger.warning(
                 "breakout.check_failed", symbol=symbol, error=str(exc)
             )
+
+    async def _breakout_interval_loop(self) -> None:
+        """5분마다 캐시된 15분봉 기준으로 돌파 조건 검사 (REST 없음, AI 없음).
+        동일 심볼은 15분 cooldown 후 재발송."""
+        _INTERVAL_SEC = 5 * 60
+        _COOLDOWN_SEC = 15 * 60
+
+        await asyncio.sleep(_INTERVAL_SEC)  # 첫 실행은 5분 후 (캔들 캐시 준비 여유)
+
+        while self._running:
+            try:
+                from src.indicator.technical import check_breakout_signals
+                now = time.monotonic()
+                symbols = self._scanner.all_symbols()
+
+                for symbol in symbols:
+                    if now - self._breakout_cooldown.get(symbol, 0.0) < _COOLDOWN_SEC:
+                        continue
+                    df = self._scanner.get_candles(symbol)
+                    if df is None or df.empty:
+                        continue
+                    triggered, conditions, values = check_breakout_signals(df)
+                    if triggered:
+                        self._breakout_cooldown[symbol] = now
+                        logger.info(
+                            "breakout_interval.detected",
+                            symbol=symbol,
+                            conditions=[c["key"] for c in conditions],
+                        )
+                        await self._notifier.send_breakout_alert(symbol, conditions, values)
+            except Exception as exc:
+                logger.warning("breakout_interval.error", error=str(exc))
+
+            await asyncio.sleep(_INTERVAL_SEC)
+
+    async def _spike_check_loop(self) -> None:
+        """1분마다 현재가 vs 마지막 확정 캔들 종가 비교 → ±10% 급등/급락 감지.
+        동일 심볼은 60분 cooldown 후 재발송."""
+        _INTERVAL_SEC = 60
+        _COOLDOWN_SEC = 60 * 60
+        _THRESHOLD = 0.10  # 10%
+
+        await asyncio.sleep(_INTERVAL_SEC)  # 첫 실행은 1분 후
+
+        while self._running:
+            try:
+                now = time.monotonic()
+                symbols = self._scanner.all_symbols()
+
+                for symbol in symbols:
+                    if now - self._spike_cooldown.get(symbol, 0.0) < _COOLDOWN_SEC:
+                        continue
+                    live = self._scanner.get_live_price(symbol)
+                    if live is None or live <= 0:
+                        continue
+                    df = self._scanner.get_candles(symbol)
+                    if df is None or df.empty:
+                        continue
+                    ref = float(df["close"].iloc[-1])
+                    if ref <= 0:
+                        continue
+                    change_pct = (live - ref) / ref
+                    if abs(change_pct) >= _THRESHOLD:
+                        self._spike_cooldown[symbol] = now
+                        label = "급등" if change_pct >= 0 else "급락"
+                        logger.info(
+                            "spike.detected",
+                            symbol=symbol,
+                            label=label,
+                            change_pct=f"{change_pct:+.2%}",
+                        )
+                        await self._notifier.send_spike_alert(symbol, change_pct, live, ref)
+            except Exception as exc:
+                logger.warning("spike_check.error", error=str(exc))
+
+            await asyncio.sleep(_INTERVAL_SEC)
 
     async def _analyze_initial_coins(self) -> None:
         """시작 시 BTC/ETH 지표 계산 + AI 분석 + 알림 (업비트 전용).

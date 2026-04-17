@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from src.indicator.technical import (
+    _BREAKOUT_MIN_CONDITIONS,
     _MIN_CANDLES,
     check_breakout_signals,
     compute_indicators,
@@ -93,8 +94,8 @@ class TestCheckBreakoutSignals:
         assert conditions == []
         assert values == {}
 
-    def test_rsi_condition_triggers(self):
-        """RSI > 50 조건을 강제로 충족시켜 조건 감지 확인"""
+    def test_rsi_condition_detected_but_not_triggered(self):
+        """RSI 조건 1개만 충족 — 3개 미만이므로 triggered=False"""
         df = _make_df()
         with patch("src.indicator.technical.compute_indicators") as mock_compute:
             mock_compute.return_value = {
@@ -106,12 +107,28 @@ class TestCheckBreakoutSignals:
             }
             triggered, conditions, values = check_breakout_signals(df)
 
-        assert triggered is True
+        assert triggered is False      # 1개 < 3개 → 미발동
         assert len(conditions) == 1
         assert conditions[0]["key"] == "rsi"
 
-    def test_volume_surge_condition_triggers(self):
-        """거래량 폭등 단독 조건 확인"""
+    def test_three_conditions_trigger(self):
+        """3개 이상 조건 충족 시 triggered=True (_BREAKOUT_MIN_CONDITIONS 기준)"""
+        df = _make_df()
+        with patch("src.indicator.technical.compute_indicators") as mock_compute:
+            mock_compute.return_value = {
+                "rsi": 55.0,          # ✓
+                "macd": 0.5,          # ✓
+                "stoch_rsi_k": 60.0,  # ✓
+                "volume_ratio": 1.2,  # ✗
+                "adx": 10.0,          # ✗
+            }
+            triggered, conditions, _ = check_breakout_signals(df)
+
+        assert triggered is True
+        assert len(conditions) == _BREAKOUT_MIN_CONDITIONS
+
+    def test_volume_surge_alone_not_triggered(self):
+        """거래량 조건 1개만 충족 — triggered=False"""
         df = _make_df()
         with patch("src.indicator.technical.compute_indicators") as mock_compute:
             mock_compute.return_value = {
@@ -123,7 +140,7 @@ class TestCheckBreakoutSignals:
             }
             triggered, conditions, _ = check_breakout_signals(df)
 
-        assert triggered is True
+        assert triggered is False
         assert any(c["key"] == "volume_ratio" for c in conditions)
 
     def test_no_condition_returns_false(self):
