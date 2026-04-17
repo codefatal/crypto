@@ -6,6 +6,7 @@ websockets==12.0          # pyupbit 0.2.33 호환 버전 (13.0+은 legacy API �
 # Technical Analysis
 pandas>=3.0.2             # Python 3.14+: pre-built wheel 필요 (--only-binary)
 numpy>=2.2.0
+ta>=0.11.0                # 기술적 지표 (RSI/MACD/StochRSI/ADX)
 
 # AI / LLM
 openai>=1.57.2            # Groq API는 OpenAI 호환 엔드포인트 사용

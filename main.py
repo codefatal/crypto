@@ -234,6 +234,9 @@ class AutoCrypto:
             if result is None:
                 return
 
+            # 1-b. 규칙 기반 돌파 알림 (AI 분석과 독립적 — 비블로킹)
+            asyncio.create_task(self._check_and_alert_breakout(symbol, df))
+
             # 약한 신호는 AI 호출 없이 조기 종료 (API 비용 절감)
             if not result.is_tradeable(min_score=settings.ai_min_score):
                 return
@@ -320,6 +323,25 @@ class AutoCrypto:
                 symbol=symbol,
                 error=str(exc),
                 exc_info=True,
+            )
+
+    async def _check_and_alert_breakout(self, symbol: str, df) -> None:
+        """규칙 기반 돌파 조건 검사 → 충족 시 즉시 알림 발송 (AI 분석과 독립)"""
+        try:
+            from src.indicator.technical import check_breakout_signals
+            triggered, conditions, values = check_breakout_signals(df)
+            if triggered:
+                logger.info(
+                    "breakout.detected",
+                    exchange=self._exchange,
+                    symbol=symbol,
+                    conditions=[c["key"] for c in conditions],
+                    count=len(conditions),
+                )
+                await self._notifier.send_breakout_alert(symbol, conditions, values)
+        except Exception as exc:
+            logger.warning(
+                "breakout.check_failed", symbol=symbol, error=str(exc)
             )
 
     async def _analyze_initial_coins(self) -> None:

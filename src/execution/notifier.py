@@ -105,7 +105,65 @@ class Notifier:
             return_exceptions=True,
         )
 
+    async def send_breakout_alert(
+        self,
+        symbol: str,
+        triggered_conditions: list[dict],
+        current_values: dict[str, float],
+    ) -> None:
+        """규칙 기반 돌파 알림을 Discord + Telegram으로 발송"""
+        await asyncio.gather(
+            self._discord_breakout(symbol, triggered_conditions, current_values),
+            self._telegram_breakout(symbol, triggered_conditions, current_values),
+            return_exceptions=True,
+        )
+
     # ── Discord ───────────────────────────────────────────────────────
+
+    async def _discord_breakout(
+        self,
+        symbol: str,
+        triggered_conditions: list[dict],
+        current_values: dict[str, float],
+    ) -> None:
+        webhook_url = self._settings.discord_signal_webhook_url or \
+                      self._settings.discord_webhook_url
+        if not webhook_url:
+            return
+
+        cond_lines = "\n".join(f"• {c['name']}" for c in triggered_conditions)
+        count = len(triggered_conditions)
+
+        def _fmt(v: float) -> str:
+            return "N/A" if v != v else f"{v:.2f}"  # NaN check
+
+        summary = (
+            f"RSI `{_fmt(current_values.get('rsi', float('nan')))}` | "
+            f"MACD `{_fmt(current_values.get('macd', float('nan')))}` | "
+            f"StochK `{_fmt(current_values.get('stoch_rsi_k', float('nan')))}` | "
+            f"VolRatio `{_fmt(current_values.get('volume_ratio', float('nan')))}x` | "
+            f"ADX `{_fmt(current_values.get('adx', float('nan')))}`"
+        )
+
+        embed = {
+            "title": f"🚀 [돌파 감지] {symbol} 기술적 조건 충족!",
+            "color": 0x00BFFF,  # 하늘색 — AI 신호(초록/빨강)와 구별
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "fields": [
+                {
+                    "name": f"✅ 충족된 조건 ({count}/5)",
+                    "value": cond_lines or "없음",
+                    "inline": False,
+                },
+                {
+                    "name": "📊 전체 지표 현황",
+                    "value": summary,
+                    "inline": False,
+                },
+            ],
+            "footer": {"text": "Rule-based Breakout Alert"},
+        }
+        await self._discord_post(webhook_url, {"embeds": [embed]})
 
     async def _discord_signal_brief(self, decision: AIDecision) -> None:
         webhook_url = self._settings.discord_signal_webhook_url or \
@@ -294,6 +352,33 @@ class Notifier:
             f"📝 *판단 근거*\n{sig.reasoning[:500]}\n\n"
             f"⚠️ *리스크*\n{risks}\n\n"
             f"_Model: {decision.model_version}_"
+        )
+        await self._telegram_plain(text)
+
+    async def _telegram_breakout(
+        self,
+        symbol: str,
+        triggered_conditions: list[dict],
+        current_values: dict[str, float],
+    ) -> None:
+        if not self._settings.telegram_bot_token or not self._settings.telegram_chat_id:
+            return
+
+        def _fmt(v: float) -> str:
+            return "N/A" if v != v else f"{v:.2f}"
+
+        cond_lines = "\n".join(f"  • {c['name']}" for c in triggered_conditions)
+        count = len(triggered_conditions)
+
+        text = (
+            f"🚀 *[돌파 감지] {symbol} 기술적 조건 충족!*\n\n"
+            f"✅ *충족된 조건 ({count}/5)*\n{cond_lines}\n\n"
+            f"📊 *전체 지표 현황*\n"
+            f"RSI: `{_fmt(current_values.get('rsi', float('nan')))}` | "
+            f"MACD: `{_fmt(current_values.get('macd', float('nan')))}`\n"
+            f"StochK: `{_fmt(current_values.get('stoch_rsi_k', float('nan')))}` | "
+            f"Vol: `{_fmt(current_values.get('volume_ratio', float('nan')))}x` | "
+            f"ADX: `{_fmt(current_values.get('adx', float('nan')))}`"
         )
         await self._telegram_plain(text)
 
