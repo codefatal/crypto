@@ -14,6 +14,9 @@
     ├─ [B] check_breakout_signals()    → 독립 실행 (비블로킹, 캔들 경계마다)
     │       └─ 5개 조건 모두 충족 → 즉시 알림 발송
     │
+    ├─ [G] detect_market_extremes()    → 독립 실행 (비블로킹, 캔들 경계마다)
+    │       └─ 패닉셀/저평가/반등 감지 → 즉시 알림 발송 (cooldown 60분)
+    │
     └─ [C] AIAnalyzer.analyze()        → Groq LLM 호출
             └─ confidence = HIGH → 전체 알림 + 실거래 (HIGH만)
 
@@ -32,6 +35,15 @@
     [F] _market_overview_loop()    — 시작 즉시 + 매시간 정각
             └─ 업비트 전 종목 24h 등락률 조회
                급등 TOP 5 / 급락 TOP 5 알림 발송
+
+    [H] _notice_monitor_loop()     — 5분마다
+            └─ 업비트 공지 API 폴링 → 신규 공지 속보 발송
+               BTC USD 라운드피겨 레벨 돌파 감지 → 속보 발송
+
+스케줄러 (APScheduler AsyncIOScheduler, KST 기준)
+
+    [I] KST 09:00 / 22:30  → fetch_market_briefing() → send_market_briefing()
+            └─ 미국/한국 지수, NVDA/AAPL/삼성/BTC/ETH 시세 + 공포탐욕 지수
 ```
 
 ---
@@ -61,6 +73,33 @@
 | ≥ 70 | LONG 또는 SHORT | 호출 |
 | < 70 | — | 미호출 (조기 종료) |
 | — | NEUTRAL | 미호출 (조기 종료) |
+
+---
+
+## [G] 극단 신호 감지 — 패닉셀 / 저평가 / 반등
+
+`detect_market_extremes(df)` → `list[ExtremeSignal]`
+
+| 신호 | 조건 | 설명 |
+|---|---|---|
+| 🚨 패닉셀 | `volume ≥ vol_MA20 × 3` AND `(close-open)/open ≤ -3%` | 대량 매도 동반 급락 캔들 |
+| 💡 저평가 | `RSI(14) ≤ 25` AND `close < BB_lower(20,2)` | 극단 과매도 + 볼린저 하단 이탈 |
+| 🚀 반등 | `StochRSI_K ≤ 20` + K 골든크로스 + 양봉 + `MACD_hist 상승` | 4가지 조건 모두 충족 시 반등 신호 |
+
+- **cooldown**: 동일 심볼+신호 타입은 60분 이내 재발송 억제
+- NaN·데이터 부족 시 해당 신호 미발동
+
+### ExtremeSignal 구조
+
+```python
+@dataclass
+class ExtremeSignal:
+    type: str        # "panic_sell" | "undervalued" | "rebound"
+    emoji: str
+    name: str
+    reasons: list[str]   # 충족 이유 목록
+    values: dict[str, Any]  # 로깅/알림용 지표값
+```
 
 ---
 
@@ -136,8 +175,14 @@
 | 돌파 알림 | 규칙 기반 5/5 모두 충족 | 하늘색 `#00BFFF` | Discord signal webhook + Telegram |
 | 급등 알림 | 현재가 vs 기준가 +10% 이상 | 주황 `#FF8C00` | Discord signal webhook + Telegram |
 | 급락 알림 | 현재가 vs 기준가 -10% 이상 | 보라 `#9400D3` | Discord signal webhook + Telegram |
+| 극단 신호 (패닉셀) | 거래량×3 + 하락≥3% | 빨강 `#FF2222` | Discord signal webhook + Telegram |
+| 극단 신호 (저평가) | RSI≤25 + BB하단 | 초록 `#00CC66` | Discord signal webhook + Telegram |
+| 극단 신호 (반등) | StochRSI+골든+양봉+MACD | 주황 `#FFAA00` | Discord signal webhook + Telegram |
 | 시장 현황 TOP 5 | 시작 즉시 + 매시간 정각 | 인디고 `#5865F2` | Discord main webhook + Telegram |
 | 도미넌스 리포트 | 시작 즉시 + 매시간 정각 | — | Discord main webhook + Telegram |
+| 거시경제 브리핑 | KST 09:00 / 22:30 | 파랑 `#4169E1` | Discord main webhook + Telegram |
+| 업비트 공지 속보 | 신규 공지 감지 | 주황 `#FF6B35` | Discord main webhook + Telegram |
+| BTC 라운드피겨 | 레벨 돌파 감지 | 주황 `#FF6B35` | Discord main webhook + Telegram |
 | 시스템 상태 | 시작 시 1회 | — | Discord main webhook + Telegram |
 | 에러 알림 | 예외 발생 | — | Discord main webhook + Telegram |
 
@@ -172,3 +217,34 @@
 | `_breakout_interval_loop` | 5분 | 캐시된 15분봉 DataFrame | 심볼별 15분 | 없음 |
 | `_spike_check_loop` | 1분 | WS live_price + 캐시 종가 | 심볼별 60분 | 없음 |
 | `_market_overview_loop` | 시작 즉시 + 매시간 | Upbit REST /v1/ticker | 없음 | 1회/시간 |
+| `_notice_monitor_loop` | 5분 | Upbit 공지 API + yfinance BTC-USD | 없음 | 1회/5분 |
+| APScheduler (KST 09:00/22:30) | 하루 2회 | yfinance 지수/주도주 | 없음 | 1회/실행 |
+
+## [H] 업비트 공지 + BTC 라운드피겨 감시 (`src/data/notice_monitor.py`)
+
+### 공지 감시 (`NoticeMonitor.check_notices()`)
+
+- Upbit `/v1/market/notice` API를 5분마다 폴링
+- 키워드 필터: `NOTICE_KEYWORDS` 환경변수 쉼표 구분, 미설정 시 기본 목록 (`상장`, `신규`, `주의` 등)
+- 중복 제거: `_seen_ids` set으로 이미 발송한 공지 재발송 방지
+- **시작 시 false-positive 방지**: `_initialized = False` 상태에서 첫 번째 호출은 현재 공지를 스냅샷으로만 저장하고 빈 목록 반환
+
+### BTC 라운드피겨 감지 (`NoticeMonitor.check_btc_round_figures()`)
+
+- `fetch_btc_usd_price()`로 수집한 BTC-USD 가격 기준
+- 레벨 목록: $30K~$200K 사이 주요 정수 (30K/35K/.../100K/110K/.../200K)
+- `_last_btc_level_idx`와 현재 레벨 인덱스 비교 → 레벨 돌파 시 `RoundFigureAlert` 반환
+
+## [I] 거시경제 브리핑 (`src/data/market_fetcher.py`)
+
+yfinance `history(period="5d", interval="1d")` 사용 — 주말/장마감 날에도 안정적 동작.
+
+| 분류 | 심볼 | 표시명 |
+|---|---|---|
+| 미국 지수 | `^GSPC`, `^IXIC`, `^DJI` | S&P 500, NASDAQ, DOW |
+| 한국 지수 | `^KS11` | KOSPI |
+| 주도주 | `NVDA`, `AAPL`, `005930.KS` | NVDA, AAPL, 삼성전자 |
+| 암호화폐 | `BTC-USD`, `ETH-USD` | BTC, ETH |
+| 공포탐욕 | alternative.me API | 0~100 + 레이블 |
+
+`MarketBriefing` dataclass: `indices`, `leaders`, `fear_greed`, `fear_label`
