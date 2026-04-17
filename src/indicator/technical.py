@@ -36,7 +36,7 @@ _THRESHOLDS = {
 _MIN_CANDLES = 35
 
 # 돌파 알림 발동 최소 조건 수 (5개 중 N개 이상 충족 시 알림)
-_BREAKOUT_MIN_CONDITIONS = 3
+_BREAKOUT_MIN_CONDITIONS = 5
 
 
 # ── 공개 함수 ──────────────────────────────────────────────────────────

@@ -111,16 +111,16 @@ class TestCheckBreakoutSignals:
         assert len(conditions) == 1
         assert conditions[0]["key"] == "rsi"
 
-    def test_three_conditions_trigger(self):
-        """3개 이상 조건 충족 시 triggered=True (_BREAKOUT_MIN_CONDITIONS 기준)"""
+    def test_five_conditions_trigger(self):
+        """5개 조건 모두 충족 시 triggered=True (_BREAKOUT_MIN_CONDITIONS 기준)"""
         df = _make_df()
         with patch("src.indicator.technical.compute_indicators") as mock_compute:
             mock_compute.return_value = {
                 "rsi": 55.0,          # ✓
                 "macd": 0.5,          # ✓
                 "stoch_rsi_k": 60.0,  # ✓
-                "volume_ratio": 1.2,  # ✗
-                "adx": 10.0,          # ✗
+                "volume_ratio": 2.5,  # ✓
+                "adx": 25.0,          # ✓
             }
             triggered, conditions, _ = check_breakout_signals(df)
 
