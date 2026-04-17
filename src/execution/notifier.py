@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 import httpx
 import structlog
 
+# Discord 웹훅은 웹훅 URL별로 30 req/min 제한이 있음.
+# 동시 발송을 직렬화하여 burst 429를 방지한다.
+_DISCORD_SEMAPHORE = asyncio.Semaphore(1)
+
 from config import get_settings
 from src.ai.schemas import AIDecision, SignalType
 from src.data.news_fetcher import DominanceData
@@ -321,13 +325,39 @@ class Notifier:
         await self._discord_post(webhook_url, {"content": content[:2000]})
 
     async def _discord_post(self, webhook_url: str, payload: dict) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(webhook_url, json=payload)
-                resp.raise_for_status()
-                logger.debug("discord.sent")
-        except Exception as exc:
-            logger.warning("discord.send_failed", error=str(exc))
+        """Discord 웹훅 POST.
+        - 전역 Semaphore(1)로 직렬화 → burst 429 방지
+        - 429 수신 시 Retry-After 헤더를 읽어 최대 2회 재시도
+        """
+        async with _DISCORD_SEMAPHORE:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    for attempt in range(3):
+                        resp = await client.post(webhook_url, json=payload)
+                        if resp.status_code == 429:
+                            # Retry-After: 헤더(초 단위) 또는 JSON body retry_after(ms 또는 초)
+                            retry_after: float = 1.0
+                            try:
+                                retry_after = float(
+                                    resp.json().get("retry_after", 1.0)
+                                )
+                                # Discord는 retry_after를 초 단위로 반환
+                            except Exception:
+                                retry_after = float(
+                                    resp.headers.get("Retry-After", "1")
+                                )
+                            logger.warning(
+                                "discord.rate_limited",
+                                retry_after=retry_after,
+                                attempt=attempt,
+                            )
+                            await asyncio.sleep(retry_after + 0.1)
+                            continue
+                        resp.raise_for_status()
+                        logger.debug("discord.sent")
+                        return
+            except Exception as exc:
+                logger.warning("discord.send_failed", error=str(exc))
 
     # ── Telegram ──────────────────────────────────────────────────────
 
